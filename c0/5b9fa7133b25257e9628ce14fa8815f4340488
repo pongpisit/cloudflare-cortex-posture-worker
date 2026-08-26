@@ -1,0 +1,19 @@
+docs/architecture.svg
+  s_55e1360a41c663::t_b1c1ed40cd1bb6 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "c05b9fa7133b25257e9628ce14fa8815f4340488",
+  "prompts": {},
+  "sessions": {
+    "s_55e1360a41c663": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_fc4336d99ffeR5T1fO9EeHuzZq",
+        "model": "gpt-5.6"
+      },
+      "human_author": "pongpisit <pongpisit@cloudflare.com>"
+    }
+  }
+}
