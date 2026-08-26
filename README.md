@@ -366,37 +366,184 @@ Put the returned D1 database ID in `wrangler.jsonc`, then apply the schema:
 npm run migrate:remote
 ```
 
-### 3. Configure Access and Cortex
+### 3. Configure Cortex and deploy
 
-1. Set the Access team domain, Access application AUD, Cortex API origin, and
-   key type in `wrangler.jsonc`.
+1. Set the Cortex API origin and key type in `wrangler.jsonc`.
 2. Add both Cortex secrets using `wrangler secret put`.
-3. Deploy the Worker on a custom hostname.
-4. Protect that hostname with an Access self-hosted application.
-5. Add a **Service Auth** policy that includes the posture service token.
-
-### 4. Deploy
+3. Configure a custom Worker hostname such as
+   `cortex-posture.example.com`. A custom hostname is recommended for the
+   Access application used in the next section.
+4. Deploy the Worker.
 
 ```bash
 npm run deploy
 ```
 
-### 5. Configure Cloudflare device posture
+## Cloudflare Zero Trust Configuration
+
+The configuration has four distinct Cloudflare objects. They serve different
+purposes and should not be combined:
+
+1. An Access service token authenticates Cloudflare to the Worker.
+2. An Access application protects the Worker itself.
+3. A custom service provider calls the Worker and imports its scores.
+4. A posture check converts the score into Pass/Fail for application policies.
+
+### 1. Create the service token
+
+In Cloudflare Zero Trust:
+
+1. Go to **Access controls > Service credentials > Service tokens**.
+2. Create a token named `Cortex posture service`.
+3. Save its client ID and client secret. The secret is shown only once.
+
+The client ID and secret are entered into the custom service provider later.
+They are not Worker environment variables and must not be committed to Git.
+
+### 2. Protect the Worker with Access
+
+Go to **Access controls > Applications** and create a **Self-hosted**
+application:
+
+| Setting | Value |
+| --- | --- |
+| Name | `Cortex posture bridge` |
+| Public hostname | `cortex-posture.example.com` |
+| Path | `/*` |
+
+Add this policy to the bridge application:
+
+| Action | Rule type | Selector | Value |
+| --- | --- | --- | --- |
+| Service Auth | Include | Service Token | `Cortex posture service` |
+
+Use **Service Auth**, not **Allow** or **Bypass**. The bridge application should
+not require the Cortex posture check; doing that would create a circular
+dependency where Cloudflare needs the check result before it can retrieve the
+check result.
+
+Copy the bridge application's **Application Audience (AUD) Tag**. Update and
+redeploy these Worker variables:
+
+```jsonc
+"ACCESS_TEAM_DOMAIN": "https://<team-name>.cloudflareaccess.com",
+"ACCESS_AUD": "<bridge-application-aud>"
+```
+
+The Worker validates the JWT even though Access already protects the hostname.
+This rejects requests that reach the Worker through an unexpected route.
+
+### 3. Add the custom service provider
 
 In Cloudflare Zero Trust:
 
 1. Go to **Integrations > Service providers**.
 2. Add a **Custom service provider**.
-3. Enter the Access service-token client ID and secret.
-4. Set the REST API URL to `https://<worker-hostname>/check`.
-5. Use a polling frequency such as ten minutes.
-6. Under **Reusable components > Posture checks > Service provider checks**,
-   create a check requiring score `>= 100`.
-7. Verify healthy and unhealthy devices in posture logs before enforcement.
-8. Add the posture check to a pilot Access or Gateway policy.
+3. Use the following values:
 
-Set posture expiration to at least twice the polling frequency. Gateway may add
-up to another five minutes before observing a changed posture result.
+| Setting | Value |
+| --- | --- |
+| Name | `Cortex XDR` |
+| Access client ID | Client ID from `Cortex posture service` |
+| Access client secret | Client secret from `Cortex posture service` |
+| REST API URL | `https://cortex-posture.example.com/check` |
+| Polling frequency | `10 minutes` |
+
+Select **Test and save**. This test verifies that the service token can pass the
+bridge application's Service Auth policy and that the Worker responds.
+
+### 4. Create the reusable posture check
+
+Go to **Reusable components > Posture checks > Service provider checks** and
+create:
+
+| Setting | Value |
+| --- | --- |
+| Name | `Cortex protected and content fresh` |
+| Provider | `Cortex XDR` |
+| Selector | Score |
+| Operator | Greater than or equal to |
+| Value | `100` |
+
+This converts the Worker's numerical result into a Cloudflare Pass/Fail signal.
+Score `100` passes. Score `0` fails.
+
+Set posture expiration through the Cloudflare API to at least twice the polling
+frequency. For a ten-minute poll, use at least twenty minutes; thirty to sixty
+minutes is a reasonable pilot setting.
+
+### 5. Require the check in an Access policy
+
+Open the Access application for the business resource you want to protect. This
+is a different application from the `Cortex posture bridge` application.
+
+Create or update an **Allow** policy:
+
+| Action | Rule type | Selector | Example value |
+| --- | --- | --- | --- |
+| Allow | Include | Emails ending in or IdP group | `@example.com` or `Employees` |
+| Allow | Require | Device posture | `Cortex protected and content fresh` |
+
+The Include rule selects eligible users. The Require rule is an AND condition,
+so a user is allowed only when identity is eligible **and** the Cortex posture
+check passes. Access is default-deny; a user who does not match an Allow policy
+remains blocked.
+
+Place a narrowly scoped emergency administrator **Allow** policy above the
+normal policy. Limit it to a dedicated emergency IdP group and do not use
+**Bypass**, because Bypass disables Access controls and request logging.
+
+### 6. Require the check in a Gateway policy
+
+Gateway HTTP and Network policies can use the same posture check through the
+**Passed Device Posture Checks** selector.
+
+An HTTP allow pattern is:
+
+| Selector | Operator | Value | Action |
+| --- | --- | --- | --- |
+| Domain or Application | in | Protected destination | Allow |
+| Passed Device Posture Checks | in | `Cortex protected and content fresh` | Allow |
+
+Place a matching Block rule immediately below it for the same destination. The
+Allow rule admits devices that pass; the fallback rule blocks devices that do
+not. Gateway evaluates rules from top to bottom, so put these rules above any
+broader Allow rule.
+
+A Network block pattern is:
+
+| Selector | Operator | Value | Action |
+| --- | --- | --- | --- |
+| SNI Domain or Destination IP | is/in | Protected destination | Block |
+| Passed Device Posture Checks | not in | `Cortex protected and content fresh` | Block |
+
+The equivalent Gateway posture expression uses the posture check UUID:
+
+```text
+not(any(device_posture.checks.passed[*] in {"<POSTURE_CHECK_UUID>"}))
+```
+
+Use the Cloudflare API's **List device posture rules** endpoint to obtain the
+UUID when managing policies through the API or Terraform.
+
+### 7. Verify before enforcement
+
+1. Ensure the Cloudflare One Client is enrolled and connected on pilot devices.
+2. Ensure the IdP, team domain, and protected application traffic pass through
+   the Cloudflare One Client according to the device profile and Split Tunnel
+   configuration.
+3. Go to **Team & Resources > Devices**, select a device, and inspect its
+   **Posture checks** tab.
+4. Review **Insights > Logs > Posture logs** for the Cortex check.
+5. Test a protected endpoint, an endpoint with content older than seven days,
+   an unknown device, and a duplicate-hostname device.
+6. Start with a pilot user group before expanding enforcement.
+
+Access observes posture changes at the custom provider polling frequency.
+Gateway maintains an additional local posture cache, so a changed result can
+take up to another five minutes to affect new sessions. Gateway evaluates
+posture when a session begins and does not terminate an already established
+session solely because a later posture refresh fails.
 
 The complete operational procedure is in
 [docs/deployment.md](docs/deployment.md).
