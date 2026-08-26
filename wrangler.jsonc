@@ -1,0 +1,59 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "cloudflare-cortex-posture-worker",
+  "main": "src/index.ts",
+  "account_id": "aa8ab6fe5b7f906df426a972033e922a",
+  "compatibility_date": "2026-08-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "AUTH_MODE": "access",
+    "ACCESS_TEAM_DOMAIN": "https://replace-me.cloudflareaccess.com",
+    "ACCESS_AUD": "replace-with-access-application-aud",
+    "CORTEX_BASE_URL": "https://replace-with-cortex-api-fqdn",
+    "CORTEX_KEY_TYPE": "advanced",
+    "MAX_CONTENT_AGE_DAYS": "7",
+    "MAX_LAST_SEEN_MINUTES": "0",
+    "CORTEX_TIMEOUT_MS": "15000",
+    "SNAPSHOT_REFRESH_MINUTES": "5"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cortex-posture",
+      "database_id": "d8c19973-0a29-495b-bf6b-4716f02861f1",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "REFRESH_QUEUE",
+        "queue": "cortex-posture-refresh"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "cortex-posture-refresh",
+        "max_batch_size": 5,
+        "max_batch_timeout": 5,
+        "max_concurrency": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "cortex-posture-refresh-dlq"
+      }
+    ]
+  },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.05
+    }
+  }
+}

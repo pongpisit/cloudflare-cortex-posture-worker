@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">Cloudflare and Cortex XDR device posture architecture</title>
+  <desc id="desc">Cloudflare polls a Worker backed by D1 while scheduled queue consumers refresh endpoint posture from Cortex XDR.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#07111f"/><stop offset="1" stop-color="#102845"/></linearGradient>
+    <filter id="shadow"><feDropShadow dx="0" dy="8" stdDeviation="10" flood-opacity=".25"/></filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#70b9ff"/></marker>
+    <style>
+      .h1{font:700 40px Arial,sans-serif;fill:#fff}.sub{font:20px Arial,sans-serif;fill:#a9c6df}.lane{font:700 18px Arial,sans-serif;letter-spacing:2px;fill:#86a9c7}.title{font:700 23px Arial,sans-serif;fill:#fff}.body{font:17px Arial,sans-serif;fill:#d9e9f5}.small{font:15px Arial,sans-serif;fill:#b9d0e1}.box{stroke-width:2;filter:url(#shadow)}.line{fill:none;stroke:#70b9ff;stroke-width:4;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <text x="70" y="72" class="h1">Cortex XDR Content Freshness as Cloudflare Device Posture</text>
+  <text x="70" y="108" class="sub">Cached policy decisions on the request path; asynchronous five-minute endpoint refresh at fleet scale</text>
+  <text x="70" y="162" class="lane">DEVICE AND POLICY PATH</text>
+  <rect x="70" y="195" width="260" height="150" rx="20" fill="#163858" stroke="#4699d4" class="box"/>
+  <text x="100" y="240" class="title">Managed device</text><text x="100" y="274" class="body">Cloudflare One Client</text><text x="100" y="307" class="small">Device ID, serial, hostname, MAC</text>
+  <rect x="415" y="195" width="290" height="150" rx="20" fill="#4b2d0b" stroke="#f6821f" class="box"/>
+  <text x="445" y="240" class="title">Cloudflare posture poll</text><text x="445" y="274" class="body">POST /check every 10 min</text><text x="445" y="307" class="small">Access service token</text>
+  <rect x="790" y="195" width="280" height="150" rx="20" fill="#3d2610" stroke="#f6a33a" class="box"/>
+  <text x="820" y="240" class="title">Posture Worker</text><text x="820" y="274" class="body">Validate Access JWT</text><text x="820" y="307" class="small">Read cached score from D1</text>
+  <rect x="1155" y="195" width="370" height="150" rx="20" fill="#173e2d" stroke="#43c58b" class="box"/>
+  <text x="1185" y="240" class="title">Device posture policy</text><text x="1185" y="274" class="body">Cortex score ≥ 100</text><text x="1185" y="307" class="small">Access/Gateway allows or blocks</text>
+  <path d="M330 270 H415" class="line"/><path d="M705 270 H790" class="line"/><path d="M1070 270 H1155" class="line"/>
+  <text x="70" y="430" class="lane">ASYNCHRONOUS REFRESH AND MAPPING</text>
+  <rect x="70" y="470" width="260" height="145" rx="20" fill="#26334a" stroke="#8799bd" class="box"/>
+  <text x="100" y="515" class="title">Cron trigger</text><text x="100" y="549" class="body">Every five minutes</text><text x="100" y="582" class="small">Find stale known endpoints</text>
+  <rect x="415" y="470" width="290" height="145" rx="20" fill="#302354" stroke="#9c79ed" class="box"/>
+  <text x="445" y="515" class="title">Cloudflare Queue</text><text x="445" y="549" class="body">Rate-controlled batches</text><text x="445" y="582" class="small">Retries and dead-letter queue</text>
+  <rect x="790" y="470" width="280" height="145" rx="20" fill="#481e2b" stroke="#eb617d" class="box"/>
+  <text x="820" y="515" class="title">Cortex XDR API</text><text x="820" y="549" class="body">get_endpoint</text><text x="820" y="582" class="small">Batches of up to 100 IDs</text>
+  <rect x="1155" y="470" width="370" height="145" rx="20" fill="#173e2d" stroke="#43c58b" class="box"/>
+  <text x="1185" y="515" class="title">D1 authoritative cache</text><text x="1185" y="549" class="body">Device mapping + snapshot</text><text x="1185" y="582" class="small">Last score retained during outage</text>
+  <path d="M330 542 H415" class="line"/><path d="M705 542 H790" class="line"/><path d="M1070 542 H1155" class="line"/>
+  <path d="M1340 470 V390 H930 V345" class="line"/>
+  <rect x="70" y="690" width="1455" height="130" rx="20" fill="#0d1d2d" stroke="#385b78" stroke-width="2"/>
+  <text x="105" y="735" class="title">Identity and failure controls</text>
+  <text x="105" y="773" class="body">Initial mapping requires exact normalized hostname + one matching MAC. Unknown or ambiguous devices score 0.</text>
+  <text x="105" y="805" class="body">During Cortex outage, only previously verified devices retain their last known score; stale use is logged for operations.</text>
+</svg>

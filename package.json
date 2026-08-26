@@ -1,0 +1,29 @@
+{
+  "name": "cloudflare-cortex-posture-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "npm run types && npm run typecheck && npm run lint && npm test && npm run deploy:dry",
+    "deploy": "wrangler deploy",
+    "deploy:dry": "wrangler deploy --dry-run",
+    "dev": "wrangler dev --test-scheduled",
+    "lint": "oxlint --deny-warnings src test",
+    "migrate:local": "wrangler d1 migrations apply cortex-posture --local",
+    "migrate:remote": "wrangler d1 migrations apply cortex-posture --remote",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "types": "wrangler types",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "jose": "^6.2.10"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "oxlint": "^1.80.0",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.126.0"
+  }
+}

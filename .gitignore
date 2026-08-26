@@ -1,0 +1,10 @@
+node_modules/
+.dev.vars
+.env*
+.wrangler/
+coverage/
+dist/
+worker-configuration.d.ts
+secrets.json
+*.log
+*.cpuprofile
