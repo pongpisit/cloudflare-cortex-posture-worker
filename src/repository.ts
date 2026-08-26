@@ -19,6 +19,7 @@ interface EvaluationRow {
   hostname: string;
   verified_mac: string;
   serial_number: string | null;
+  virtual_ipv4: string | null;
 }
 
 interface EndpointIdRow {
@@ -28,6 +29,7 @@ interface EndpointIdRow {
 export async function getStoredEvaluations(
   db: D1Database,
   deviceIds: string[],
+  verifiedAfter?: number,
 ): Promise<Map<string, StoredEvaluation>> {
   const evaluations = new Map<string, StoredEvaluation>();
 
@@ -36,16 +38,17 @@ export async function getStoredEvaluations(
     const query = `
       SELECT m.cloudflare_device_id, m.cortex_endpoint_id,
              s.score, s.reason, s.cortex_refreshed_at,
-             m.hostname, m.verified_mac, m.serial_number
+             m.hostname, m.verified_mac, m.serial_number, m.virtual_ipv4
       FROM device_mappings m
       LEFT JOIN endpoint_snapshots s
         ON s.cortex_endpoint_id = m.cortex_endpoint_id
       WHERE m.status = 'verified'
+        ${verifiedAfter === undefined ? "" : "AND m.last_verified_at >= ?"}
         AND m.cloudflare_device_id IN (${placeholders})
     `;
     const result = await db
       .prepare(query)
-      .bind(...ids)
+      .bind(...(verifiedAfter === undefined ? ids : [verifiedAfter, ...ids]))
       .all<EvaluationRow>();
 
     for (const row of result.results) {
@@ -58,11 +61,121 @@ export async function getStoredEvaluations(
         hostname: row.hostname,
         verifiedMac: row.verified_mac,
         serialNumber: row.serial_number,
+        virtualIpv4: row.virtual_ipv4,
       });
     }
   }
 
   return evaluations;
+}
+
+export async function getStoredEvaluationByVirtualIp(
+  db: D1Database,
+  virtualIp: string,
+  verifiedAfter: number,
+): Promise<StoredEvaluation | null> {
+  const result = await db
+    .prepare(
+      `SELECT m.cloudflare_device_id, m.cortex_endpoint_id,
+              s.score, s.reason, s.cortex_refreshed_at,
+              m.hostname, m.verified_mac, m.serial_number, m.virtual_ipv4
+       FROM device_mappings m
+       LEFT JOIN endpoint_snapshots s
+         ON s.cortex_endpoint_id = m.cortex_endpoint_id
+       WHERE m.status = 'verified'
+         AND m.virtual_ipv4 = ?
+         AND m.last_verified_at >= ?
+       LIMIT 2`,
+    )
+    .bind(virtualIp, verifiedAfter)
+    .all<EvaluationRow>();
+
+  if (result.results.length !== 1) return null;
+  const row = result.results[0]!;
+  return {
+    cloudflareDeviceId: row.cloudflare_device_id,
+    cortexEndpointId: row.cortex_endpoint_id,
+    score: row.score,
+    reason: row.reason,
+    cortexRefreshedAt: row.cortex_refreshed_at,
+    hostname: row.hostname,
+    verifiedMac: row.verified_mac,
+    serialNumber: row.serial_number,
+    virtualIpv4: row.virtual_ipv4,
+  };
+}
+
+export async function updateDeviceVirtualIps(
+  db: D1Database,
+  devices: Array<{ deviceId: string; virtualIpv4: string | null }>,
+  observationId: string,
+): Promise<void> {
+  const now = Date.now();
+  const statements = devices.map(({ deviceId, virtualIpv4 }) =>
+    db
+      .prepare(
+        `UPDATE device_mappings
+         SET virtual_ipv4 = ?, updated_at = ?, last_verified_at = ?
+         WHERE cloudflare_device_id = ?
+           AND status = 'verified'
+           AND EXISTS (
+             SELECT 1 FROM device_observations o
+             WHERE o.cloudflare_device_id = device_mappings.cloudflare_device_id
+               AND o.observation_id = ?
+           )`,
+      )
+      .bind(virtualIpv4, now, now, deviceId, observationId),
+  );
+  for (const batch of chunk(statements, 100)) await db.batch(batch);
+}
+
+export async function invalidateDeviceMappings(
+  db: D1Database,
+  deviceIds: string[],
+  observationId: string,
+): Promise<void> {
+  const now = Date.now();
+  const statements = deviceIds.map((deviceId) =>
+    db
+      .prepare(
+        `UPDATE device_mappings
+         SET status = 'invalid', virtual_ipv4 = NULL, updated_at = ?
+         WHERE cloudflare_device_id = ?
+           AND EXISTS (
+             SELECT 1 FROM device_observations o
+             WHERE o.cloudflare_device_id = device_mappings.cloudflare_device_id
+               AND o.observation_id = ?
+           )`,
+      )
+      .bind(now, deviceId, observationId),
+  );
+  for (const batch of chunk(statements, 100)) await db.batch(batch);
+}
+
+export async function saveDeviceObservations(
+  db: D1Database,
+  deviceIds: string[],
+  observationId: string,
+  observedAt: number,
+): Promise<void> {
+  const statements = deviceIds.map((deviceId) =>
+    db
+      .prepare(
+        `INSERT INTO device_observations(
+           cloudflare_device_id, observation_id, observed_at
+         ) VALUES (?, ?, ?)
+         ON CONFLICT(cloudflare_device_id) DO UPDATE SET
+           observation_id = excluded.observation_id,
+           observed_at = excluded.observed_at
+         WHERE excluded.observed_at > device_observations.observed_at
+            OR (
+              excluded.observed_at = device_observations.observed_at
+              AND excluded.observation_id > device_observations.observation_id
+            )`,
+      )
+      .bind(deviceId, observationId, observedAt),
+  );
+  for (const batch of chunk(statements, 100)) await db.batch(batch);
 }
 
 export async function claimDueEndpointIds(
@@ -157,7 +270,8 @@ export async function saveEndpointSnapshots(
 export async function saveDeviceMappings(
   db: D1Database,
   mappings: Array<{ device: CloudflareDevice; endpoint: CortexEndpoint }>,
-  now: number,
+  observationId: string,
+  observedAt: number,
 ): Promise<void> {
   const statements = mappings.map(({ device, endpoint }) => {
     const deviceMacs = normalizeMacCollection(device.mac_address);
@@ -165,27 +279,36 @@ export async function saveDeviceMappings(
     const verifiedMac = [...deviceMacs].find((mac) => endpointMacs.has(mac)) ?? "";
     return db.prepare(
       `INSERT INTO device_mappings(
-         cloudflare_device_id, serial_number, cortex_endpoint_id,
-         hostname, verified_mac, status, created_at, updated_at,
-         last_verified_at
-       ) VALUES (?, ?, ?, ?, ?, 'verified', ?, ?, ?)
-       ON CONFLICT(cloudflare_device_id) DO UPDATE SET
-         serial_number = excluded.serial_number,
-         cortex_endpoint_id = excluded.cortex_endpoint_id,
-         hostname = excluded.hostname,
-         verified_mac = excluded.verified_mac,
-         status = 'verified',
-         updated_at = excluded.updated_at,
-         last_verified_at = excluded.last_verified_at`,
+          cloudflare_device_id, serial_number, virtual_ipv4, cortex_endpoint_id,
+          hostname, verified_mac, status, created_at, updated_at,
+          last_verified_at
+        )
+        SELECT ?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?
+        WHERE EXISTS (
+          SELECT 1 FROM device_observations o
+          WHERE o.cloudflare_device_id = ? AND o.observation_id = ?
+        )
+        ON CONFLICT(cloudflare_device_id) DO UPDATE SET
+          serial_number = excluded.serial_number,
+          virtual_ipv4 = excluded.virtual_ipv4,
+          cortex_endpoint_id = excluded.cortex_endpoint_id,
+          hostname = excluded.hostname,
+          verified_mac = excluded.verified_mac,
+          status = 'verified',
+          updated_at = excluded.updated_at,
+          last_verified_at = excluded.last_verified_at`,
     ).bind(
       device.device_id,
       device.serial_number ?? null,
+      device.virtual_ipv4 ?? null,
       endpoint.endpoint_id,
       normalizeHostname(device.hostname),
       verifiedMac,
-      now,
-      now,
-      now,
+      observedAt,
+      observedAt,
+      observedAt,
+      device.device_id,
+      observationId,
     );
   });
   for (const batch of chunk(statements, 100)) await db.batch(batch);

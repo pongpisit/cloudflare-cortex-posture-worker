@@ -17,27 +17,32 @@ Cortex API.
 
 ```mermaid
 flowchart LR
-  D[Managed device<br/>Cloudflare One Client] -->|Device identity| CF[Cloudflare custom<br/>service provider]
-  CF -->|POST /check<br/>Access JWT| W[Posture Worker]
-  W -->|Read mapping and score| DB[(D1)]
-  W -->|Score 0 or 100| CF
-  CF --> P{Posture score<br/>>= 100?}
-  P -->|Pass| A[Access or Gateway<br/>allow]
-  P -->|Fail| B[Block]
-
+  D[Managed device<br/>Cloudflare One Client] --> CF[Custom service provider]
+  CF -->|Device identity| W[Posture Worker]
+  A[Access] -->|Signed device identity| W
+  G[Gateway Network policy] -->|Internal L4 context| GW[Route-less Gateway Worker]
+  W -->|Device ID lookup| DB[(D1)]
+  GW -->|Unique source-IP lookup| DB
+  W -->|Score or signed boolean| A
+  GW -->|Number 0 or 100| G
   CRON[Cron every 5 minutes] --> Q[Cloudflare Queue]
   W -->|Unknown-device discovery| Q
   Q -->|POST get_endpoint| X[Cortex XDR API]
-  X -->|Endpoint state| Q
+  X --> Q
   Q -->|Mapping and snapshot| DB
 ```
 
-The system has two separate paths:
+The system has four separate paths:
 
 1. **Posture evaluation path:** Cloudflare calls the Worker, the Worker reads
    D1, and a score is returned immediately.
 2. **Cortex refresh path:** Cron and Queue consumers call Cortex asynchronously
    and update D1 for later posture requests.
+3. **Access External Evaluation:** Access sends a signed identity containing the
+   Cloudflare device ID. The Worker returns a nonce-bound signed boolean.
+4. **Gateway Custom Function:** Gateway internally invokes a route-less Worker
+   with L4 context. The Worker resolves the unique verified WARP source IP and
+   returns the cached score as a number.
 
 This separation prevents Cortex latency or rate limits from slowing every
 Cloudflare posture poll.
@@ -50,6 +55,8 @@ Cloudflare posture poll.
 | Custom service provider | Polls the Worker and stores the returned score for each device |
 | Cloudflare Access | Protects the Worker with a service token and issues the application JWT |
 | Worker HTTP handler | Validates Access, reads D1, returns posture scores, and queues unknown devices |
+| External Evaluation adapter | Verifies Access-signed requests and signs nonce-bound boolean decisions |
+| Gateway adapter Worker | Resolves a unique verified source IP to a numeric cached score; has no public route |
 | D1 | Stores verified device mappings, Cortex endpoint snapshots, scores, refresh leases, and integration health |
 | Cron trigger | Runs every five minutes and finds endpoint snapshots that need refreshing |
 | Cloudflare Queue | Buffers and rate-controls Cortex lookups, retries failures, and sends exhausted jobs to a DLQ |
@@ -155,9 +162,13 @@ Queue messages retry five times with delay. Exhausted messages go to
 | --- | --- | --- |
 | `POST /check` | Cloudflare custom service provider | Return `s2s_id` and score for every device |
 | `GET /health` | Authorized operator or monitor | Return non-sensitive Cortex integration health timestamps |
+| `POST /external-evaluation` | Cloudflare Access | Verify a signed identity and return a signed boolean decision |
+| `GET /external-evaluation/keys` | Cloudflare Access | Return the public JWKS used to verify evaluation responses |
 
-Both endpoints require a valid `Cf-Access-Jwt-Assertion` from the configured
-Access application.
+`/check` and `/health` require a valid `Cf-Access-Jwt-Assertion`. External
+Evaluation routes are public because Access calls them directly; requests are
+authenticated by the signed token in the request body. The Gateway Worker has
+no `workers.dev` URL or route and is invoked internally by script name.
 
 ### Cloudflare Access certificates API
 
@@ -310,10 +321,11 @@ before enforcing this check broadly.
 
 | Table | Contents |
 | --- | --- |
-| `device_mappings` | Cloudflare device ID, serial, Cortex endpoint ID, verified hostname/MAC, mapping status |
+| `device_mappings` | Cloudflare device ID, serial, WARP virtual IPv4, Cortex endpoint ID, verified hostname/MAC, mapping status |
 | `endpoint_snapshots` | Cortex state, timestamps, score, reason, and refresh time |
 | `integration_status` | Last Cortex success/error timestamps and health state |
 | `refresh_leases` | Temporary claims that prevent repeated Cron refresh messages |
+| `device_observations` | Latest request token per device, preventing delayed discovery jobs from restoring stale mappings |
 
 No Cortex API key, Access service-token secret, user email, or complete Cortex
 response is stored in D1 or application logs.
@@ -332,12 +344,16 @@ Non-secret settings are in `wrangler.jsonc`:
 | `MAX_LAST_SEEN_MINUTES` | `0` | Optional check-in age; zero disables it |
 | `CORTEX_TIMEOUT_MS` | `15000` | Cortex request timeout |
 | `SNAPSHOT_REFRESH_MINUTES` | `5` | Age at which snapshots are queued for refresh |
+| `EXTERNAL_EVAL_AUDS` | Access application AUDs | Comma-separated protected application audiences allowed to call External Evaluation |
+| `EXTERNAL_EVAL_MAPPING_MAX_AGE_MINUTES` | `30` | Maximum mapping age accepted by External Evaluation |
+| `GATEWAY_IP_MAX_AGE_MINUTES` | `30` | Gateway-only maximum age of a source-IP binding before it fails closed |
 
 Secrets are stored with Wrangler, never in `wrangler.jsonc`:
 
 ```bash
 npx wrangler secret put CORTEX_API_KEY
 npx wrangler secret put CORTEX_API_KEY_ID
+npm run key:external-evaluation | npx wrangler secret put EXTERNAL_EVAL_PRIVATE_JWK
 ```
 
 ## Deployment
@@ -373,7 +389,8 @@ npm run migrate:remote
 3. Configure a custom Worker hostname such as
    `cortex-posture.example.com`. A custom hostname is recommended for the
    Access application used in the next section.
-4. Deploy the Worker.
+4. Set `EXTERNAL_EVAL_AUDS` if using Access External Evaluation.
+5. Deploy the posture Worker and route-less Gateway Worker.
 
 ```bash
 npm run deploy
@@ -526,7 +543,51 @@ not(any(device_posture.checks.passed[*] in {"<POSTURE_CHECK_UUID>"}))
 Use the Cloudflare API's **List device posture rules** endpoint to obtain the
 UUID when managing policies through the API or Terraform.
 
-### 7. Verify before enforcement
+### 7. Configure Access External Evaluation
+
+External Evaluation is an alternative Access policy path that reads the same
+cached score by `identity.device_id` without waiting for Cortex.
+
+1. Set `EXTERNAL_EVAL_AUDS` to the AUD of each protected Access application,
+   separated by commas, then redeploy.
+2. Generate and store the response-signing key with the command in the Secrets
+   section. Never commit or print the generated private JWK.
+3. Add an External Evaluation `Require` rule with:
+
+| Setting | Value |
+| --- | --- |
+| Evaluate URL | `https://<workers-dev-host>/external-evaluation` |
+| Keys URL | `https://<workers-dev-host>/external-evaluation/keys` |
+
+Use the `workers.dev` hostname for these routes unless the custom hostname's
+Access application explicitly leaves them reachable. Access signs the incoming
+JWT; the Worker verifies its signature, expiry, and application audience, then
+returns a signed response with the original nonce. Unknown, invalid, or failing
+devices return `success: false`.
+Mappings older than `EXTERNAL_EVAL_MAPPING_MAX_AGE_MINUTES` also fail closed;
+keep this value longer than the custom provider polling interval.
+
+### 8. Configure a Gateway Custom Function
+
+Deploy `cloudflare-cortex-posture-gateway` using `npm run deploy`, then create a
+Gateway Custom Function with these values:
+
+| Setting | Value |
+| --- | --- |
+| Key | `cortex_score` |
+| Type | Number |
+| Default value | `0` |
+| Worker name | `cloudflare-cortex-posture-gateway` |
+
+Use `custom.cortex_score >= 100` in a Gateway Network policy. The default must
+remain `0`: Gateway uses it when dispatch, timeout, response parsing, or Worker
+execution fails. The Gateway context does not contain a device ID, so the
+adapter uses `src_ip`; it passes only when exactly one verified device mapping
+has that WARP virtual IPv4. Missing, stale, or duplicate mappings return `0`.
+The custom provider reverifies the binding on each successful poll; bindings
+older than `GATEWAY_IP_MAX_AGE_MINUTES` also return `0`.
+
+### 9. Verify before enforcement
 
 1. Ensure the Cloudflare One Client is enrolled and connected on pilot devices.
 2. Ensure the IdP, team domain, and protected application traffic pass through

@@ -1,14 +1,21 @@
 import { AuthenticationError, validateAccessRequest } from "./auth";
 import { getEndpointsByHostnames, getEndpointsByIds } from "./cortex";
+import {
+  evaluateExternalRequest,
+  getExternalEvaluationKeys,
+} from "./external-evaluation";
 import { evaluateEndpoint, findCortexEndpoint, normalizeHostname } from "./posture";
 import {
   claimDueEndpointIds,
   getStoredEvaluations,
+  invalidateDeviceMappings,
   markMissingEndpoints,
   recordCortexError,
   recordCortexSuccess,
+  saveDeviceObservations,
   saveDeviceMappings,
   saveEndpointSnapshots,
+  updateDeviceVirtualIps,
 } from "./repository";
 import type {
   CloudflareDevice,
@@ -24,8 +31,20 @@ const MAX_DEVICES = 1000;
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     try {
-      await validateAccessRequest(request, env);
       const url = new URL(request.url);
+
+      if (url.pathname === "/external-evaluation/keys") {
+        if (request.method !== "GET") return methodNotAllowed("GET");
+        return getExternalEvaluationKeys(env);
+      }
+
+      if (url.pathname === "/external-evaluation") {
+        if (request.method !== "POST") return methodNotAllowed("POST");
+        const body = await readRequestJson(request, 16 * 1024);
+        return evaluateExternalRequest(body, env);
+      }
+
+      await validateAccessRequest(request, env);
 
       if (url.pathname === "/health") {
         if (request.method !== "GET") return methodNotAllowed("GET");
@@ -42,6 +61,14 @@ export default {
 
       const body = await readRequestJson(request, MAX_REQUEST_BYTES);
       const devices = parseDevices(body);
+      const observationId = crypto.randomUUID();
+      const observedAt = Date.now();
+      await saveDeviceObservations(
+        env.DB,
+        devices.map((device) => device.device_id),
+        observationId,
+        observedAt,
+      );
       const evaluations = await getStoredEvaluations(
         env.DB,
         devices.map((device) => device.device_id),
@@ -53,6 +80,11 @@ export default {
       >;
       const discoveries: CloudflareDevice[] = [];
       const missingSnapshots = new Set<string>();
+      const verifiedVirtualIps: Array<{
+        deviceId: string;
+        virtualIpv4: string | null;
+      }> = [];
+      const invalidDeviceIds: string[] = [];
       let staleCount = 0;
       const staleAfter =
         positiveNumber(env.SNAPSHOT_REFRESH_MINUTES, 5) * 2 * 60_000;
@@ -76,9 +108,15 @@ export default {
           );
         if (identityChanged) {
           result[device.device_id] = { s2s_id: "", score: 0 };
+          invalidDeviceIds.push(device.device_id);
           discoveries.push(device);
           continue;
         }
+
+        verifiedVirtualIps.push({
+          deviceId: device.device_id,
+          virtualIpv4: device.virtual_ipv4 ?? null,
+        });
 
         if (stored.score === null) {
           result[device.device_id] = {
@@ -103,9 +141,19 @@ export default {
         };
       }
 
+      await Promise.all([
+        invalidateDeviceMappings(env.DB, invalidDeviceIds, observationId),
+        updateDeviceVirtualIps(env.DB, verifiedVirtualIps, observationId),
+      ]);
+
       ctx.waitUntil(
         Promise.all([
-          enqueueDiscoveries(env.REFRESH_QUEUE, discoveries),
+          enqueueDiscoveries(
+            env.REFRESH_QUEUE,
+            discoveries,
+            observationId,
+            observedAt,
+          ),
           enqueueRefreshes(env.REFRESH_QUEUE, [...missingSnapshots]),
         ]).catch((error: unknown) => {
           console.error(
@@ -206,6 +254,19 @@ async function processRefreshMessage(
     throw new Error("Unknown queue message type");
   }
 
+  const observedAt = message.observedAt;
+  const observationId = message.observationId;
+  if (
+    typeof observationId !== "string" ||
+    !observationId ||
+    typeof observedAt !== "number" ||
+    !Number.isFinite(observedAt) ||
+    observedAt <= 0
+  ) {
+    console.warn(JSON.stringify({ event: "stale_discovery_message_dropped" }));
+    return false;
+  }
+
   const hostnames = [
     ...new Set(
       message.devices
@@ -239,7 +300,7 @@ async function processRefreshMessage(
     mappings.push({ device, endpoint });
   }
 
-  await saveDeviceMappings(env.DB, mappings, now);
+  await saveDeviceMappings(env.DB, mappings, observationId, observedAt);
   await persistEvaluatedEndpoints([...matched.values()], env, now);
   return true;
 }
@@ -270,9 +331,16 @@ async function persistEvaluatedEndpoints(
 async function enqueueDiscoveries(
   queue: Queue<RefreshMessage>,
   devices: CloudflareDevice[],
+  observationId: string,
+  observedAt: number,
 ): Promise<void> {
   const messages = chunk(devices, 25).map((deviceBatch) => ({
-    body: { type: "discover", devices: deviceBatch } satisfies RefreshMessage,
+    body: {
+      type: "discover",
+      devices: deviceBatch,
+      observationId,
+      observedAt,
+    } satisfies RefreshMessage,
   }));
   await sendQueueMessages(queue, messages);
 }

@@ -1,13 +1,14 @@
 flowchart LR
-  D[Managed device\nCloudflare One Client] -->|Device identity| CF[Cloudflare custom\nservice provider]
-  CF -->|POST /check every 10 min\nAccess application token| W[Posture Worker\nJWT validation]
-  W -->|Read cached mapping + score| DB[(D1\nMappings and snapshots)]
-  W -->|0 or 100 per device| CF
-  CF --> P{Posture check\nScore >= 100?}
-  P -->|Pass| A[Access or Gateway policy\nAllow managed resource]
-  P -->|Fail| B[Block access]
+  D[Managed device\nCloudflare One Client] --> CF[Custom service provider]
+  CF -->|Device identity| W[Posture Worker]
+  A[Access] -->|Signed device identity| W
+  G[Gateway Network policy] -->|Internal L4 context| GW[Route-less Gateway Worker]
+  W -->|Device ID lookup| DB[(D1\nMappings and snapshots)]
+  GW -->|Unique source-IP lookup| DB
+  W -->|Score or signed boolean| A
+  GW -->|Number 0 or 100| G
   CRON[Cron trigger\nevery 5 min] --> Q[Cloudflare Queue\nBatched refresh jobs]
   W -->|Unknown device discovery| Q
   Q -->|endpoint_id_list\nup to 100| X[Cortex XDR API]
-  X -->|Protection state, last seen,\nlast content update time| Q
-  Q -->|Verified hostname + MAC mapping\nand evaluated score| DB
+  X -->|Endpoint state| Q
+  Q -->|Verified mapping and score| DB

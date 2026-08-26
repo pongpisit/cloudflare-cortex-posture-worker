@@ -15,7 +15,9 @@
     "MAX_CONTENT_AGE_DAYS": "7",
     "MAX_LAST_SEEN_MINUTES": "0",
     "CORTEX_TIMEOUT_MS": "15000",
-    "SNAPSHOT_REFRESH_MINUTES": "5"
+    "SNAPSHOT_REFRESH_MINUTES": "5",
+    "EXTERNAL_EVAL_AUDS": "replace-with-protected-application-aud",
+    "EXTERNAL_EVAL_MAPPING_MAX_AGE_MINUTES": "30"
   },
   "d1_databases": [
     {

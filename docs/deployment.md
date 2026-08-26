@@ -31,7 +31,9 @@ Update these non-secret values in `wrangler.jsonc`:
 "ACCESS_TEAM_DOMAIN": "https://your-team.cloudflareaccess.com",
 "ACCESS_AUD": "your-access-application-audience",
 "CORTEX_BASE_URL": "https://api-your-cortex-fqdn",
-"CORTEX_KEY_TYPE": "advanced"
+"CORTEX_KEY_TYPE": "advanced",
+"EXTERNAL_EVAL_AUDS": "protected-access-application-aud",
+"EXTERNAL_EVAL_MAPPING_MAX_AGE_MINUTES": "30"
 ```
 
 Keep `MAX_CONTENT_AGE_DAYS` at `7`, or change it deliberately. A
@@ -65,9 +67,10 @@ Store secrets interactively:
 ```bash
 npx wrangler secret put CORTEX_API_KEY
 npx wrangler secret put CORTEX_API_KEY_ID
+npm run key:external-evaluation | npx wrangler secret put EXTERNAL_EVAL_PRIVATE_JWK
 ```
 
-Deploy:
+Deploy the public posture Worker and route-less Gateway Worker:
 
 ```bash
 npm run check
@@ -109,6 +112,31 @@ Set posture expiration through the API to at least twice the polling interval.
 Thirty to sixty minutes is a reasonable pilot value.
 
 ## 6. Apply policy safely
+
+For Access External Evaluation, configure:
+
+| Setting | Value |
+| --- | --- |
+| Evaluate URL | `https://<workers-dev-host>/external-evaluation` |
+| Keys URL | `https://<workers-dev-host>/external-evaluation/keys` |
+
+The protected application's AUD must be present in `EXTERNAL_EVAL_AUDS`.
+The mapping-age limit should remain longer than the custom provider polling
+interval; stale mappings fail closed.
+
+For a Gateway Network Custom Function, use:
+
+| Setting | Value |
+| --- | --- |
+| Key | `cortex_score` |
+| Type | Number |
+| Default value | `0` |
+| Worker name | `cloudflare-cortex-posture-gateway` |
+
+Reference it as `custom.cortex_score >= 100`. Do not use a nonzero default;
+Gateway uses the default when internal Worker evaluation fails.
+`GATEWAY_IP_MAX_AGE_MINUTES` defaults to 30 and should remain longer than the
+custom provider polling interval. Older source-IP bindings fail closed.
 
 1. Test healthy, stale, unprotected, unknown, and duplicate-hostname devices.
 2. Review device posture and Worker logs.
