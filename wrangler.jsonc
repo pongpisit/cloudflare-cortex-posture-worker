@@ -13,11 +13,13 @@
     "CORTEX_BASE_URL": "https://replace-with-cortex-api-fqdn",
     "CORTEX_KEY_TYPE": "advanced",
     "MAX_CONTENT_AGE_DAYS": "7",
-    "MAX_LAST_SEEN_MINUTES": "0",
     "CORTEX_TIMEOUT_MS": "15000",
     "SNAPSHOT_REFRESH_MINUTES": "5",
-    "EXTERNAL_EVAL_AUDS": "replace-with-protected-application-aud",
-    "EXTERNAL_EVAL_MAPPING_MAX_AGE_MINUTES": "30"
+    "CLOUDFLARE_LIST_SYNC_ENABLED": "false",
+    "CLOUDFLARE_ACCOUNT_ID": "aa8ab6fe5b7f906df426a972033e922a",
+    "CLOUDFLARE_SERIAL_LIST_ID": "replace-with-zero-trust-serial-list-id",
+    "CLOUDFLARE_SERIAL_LIST_NAME": "Cortex noncompliant devices",
+    "CLOUDFLARE_LIST_MAX_ITEMS": "1000"
   },
   "d1_databases": [
     {

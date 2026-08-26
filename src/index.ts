@@ -1,21 +1,23 @@
 import { AuthenticationError, validateAccessRequest } from "./auth";
 import { getEndpointsByHostnames, getEndpointsByIds } from "./cortex";
-import {
-  evaluateExternalRequest,
-  getExternalEvaluationKeys,
-} from "./external-evaluation";
+import { reconcileNoncompliantSerialList } from "./cloudflare-list";
 import { evaluateEndpoint, findCortexEndpoint, normalizeHostname } from "./posture";
 import {
   claimDueEndpointIds,
+  claimSyncLease,
   getStoredEvaluations,
   invalidateDeviceMappings,
   markMissingEndpoints,
   recordCortexError,
   recordCortexSuccess,
+  recordListSyncError,
+  recordListSyncSuccess,
+  releaseRefreshLeases,
+  releaseSyncLease,
   saveDeviceObservations,
   saveDeviceMappings,
   saveEndpointSnapshots,
-  updateDeviceVirtualIps,
+  updateVerifiedDeviceSerials,
 } from "./repository";
 import type {
   CloudflareDevice,
@@ -32,17 +34,6 @@ export default {
   async fetch(request, env, ctx): Promise<Response> {
     try {
       const url = new URL(request.url);
-
-      if (url.pathname === "/external-evaluation/keys") {
-        if (request.method !== "GET") return methodNotAllowed("GET");
-        return getExternalEvaluationKeys(env);
-      }
-
-      if (url.pathname === "/external-evaluation") {
-        if (request.method !== "POST") return methodNotAllowed("POST");
-        const body = await readRequestJson(request, 16 * 1024);
-        return evaluateExternalRequest(body, env);
-      }
 
       await validateAccessRequest(request, env);
 
@@ -80,11 +71,11 @@ export default {
       >;
       const discoveries: CloudflareDevice[] = [];
       const missingSnapshots = new Set<string>();
-      const verifiedVirtualIps: Array<{
-        deviceId: string;
-        virtualIpv4: string | null;
-      }> = [];
       const invalidDeviceIds: string[] = [];
+      const serialUpdates: Array<{
+        deviceId: string;
+        serialNumber: string | null;
+      }> = [];
       let staleCount = 0;
       const staleAfter =
         positiveNumber(env.SNAPSHOT_REFRESH_MINUTES, 5) * 2 * 60_000;
@@ -98,13 +89,13 @@ export default {
         }
 
         const currentMacs = normalizeDeviceMacs(device.mac_address);
+        const currentSerial = device.serial_number?.trim() || null;
+        const storedSerial = stored.serialNumber?.trim() || null;
         const identityChanged =
           normalizeHostname(device.hostname) !== stored.hostname ||
           !currentMacs.has(stored.verifiedMac) ||
           Boolean(
-            stored.serialNumber &&
-              device.serial_number &&
-              stored.serialNumber !== device.serial_number,
+            storedSerial && currentSerial && storedSerial !== currentSerial,
           );
         if (identityChanged) {
           result[device.device_id] = { s2s_id: "", score: 0 };
@@ -113,10 +104,12 @@ export default {
           continue;
         }
 
-        verifiedVirtualIps.push({
-          deviceId: device.device_id,
-          virtualIpv4: device.virtual_ipv4 ?? null,
-        });
+        if (currentSerial !== storedSerial) {
+          serialUpdates.push({
+            deviceId: device.device_id,
+            serialNumber: currentSerial,
+          });
+        }
 
         if (stored.score === null) {
           result[device.device_id] = {
@@ -143,7 +136,12 @@ export default {
 
       await Promise.all([
         invalidateDeviceMappings(env.DB, invalidDeviceIds, observationId),
-        updateDeviceVirtualIps(env.DB, verifiedVirtualIps, observationId),
+        updateVerifiedDeviceSerials(
+          env.DB,
+          serialUpdates,
+          observationId,
+          observedAt,
+        ),
       ]);
 
       ctx.waitUntil(
@@ -195,23 +193,92 @@ export default {
   },
 
   async scheduled(_controller, env): Promise<void> {
+    if (env.CLOUDFLARE_LIST_SYNC_ENABLED.toLowerCase() === "true") {
+      let leaseToken: string | null = null;
+      try {
+        leaseToken = await claimSyncLease(
+          env.DB,
+          "cloudflare_serial_list",
+          Date.now(),
+        );
+        if (leaseToken) {
+          const result = await reconcileNoncompliantSerialList(env);
+          await recordListSyncSuccess(env.DB, result.count, Date.now());
+          console.log(
+            JSON.stringify({
+              event: "serial_denylist_synchronized",
+              changed: result.changed,
+              count: result.count,
+            }),
+          );
+        }
+      } catch (error) {
+        const detail = errorMessage(error);
+        try {
+          await recordListSyncError(env.DB, detail, Date.now());
+        } catch (statusError) {
+          console.error(
+            JSON.stringify({
+              event: "serial_denylist_status_error",
+              error: errorMessage(statusError),
+            }),
+          );
+        }
+        console.error(
+          JSON.stringify({
+            event: "serial_denylist_sync_error",
+            error: detail,
+          }),
+        );
+      } finally {
+        if (leaseToken) {
+          await releaseSyncLease(
+            env.DB,
+            "cloudflare_serial_list",
+            leaseToken,
+          ).catch((error: unknown) => {
+            console.error(
+              JSON.stringify({
+                event: "serial_denylist_lease_release_error",
+                error: errorMessage(error),
+              }),
+            );
+          });
+        }
+      }
+    }
+
     const refreshMinutes = positiveNumber(env.SNAPSHOT_REFRESH_MINUTES, 5);
     const cutoff = Date.now() - refreshMinutes * 60_000;
     let afterId = "";
     let queued = 0;
 
-    while (true) {
-      const endpointIds = await claimDueEndpointIds(
-        env.DB,
-        cutoff,
-        afterId,
-        1000,
+    try {
+      while (true) {
+        const claim = await claimDueEndpointIds(
+          env.DB,
+          cutoff,
+          afterId,
+          1000,
+        );
+        if (claim.endpointIds.length > 0) {
+          await enqueueRefreshes(
+            env.REFRESH_QUEUE,
+            claim.endpointIds,
+            claim.leaseToken,
+          );
+          queued += claim.endpointIds.length;
+        }
+        if (claim.nextAfterId === afterId) break;
+        afterId = claim.nextAfterId;
+      }
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "scheduled_refresh_error",
+          error: errorMessage(error),
+        }),
       );
-      if (endpointIds.length === 0) break;
-      await enqueueRefreshes(env.REFRESH_QUEUE, endpointIds);
-      queued += endpointIds.length;
-      afterId = endpointIds.at(-1) ?? afterId;
-      if (endpointIds.length < 1000) break;
     }
 
     console.log(JSON.stringify({ event: "scheduled_refresh", queued }));
@@ -247,6 +314,13 @@ async function processRefreshMessage(
     const now = Date.now();
     await persistEvaluatedEndpoints(endpoints, env, now);
     await markMissingEndpoints(env.DB, missingIds, now);
+    if (message.leaseToken) {
+      await releaseRefreshLeases(
+        env.DB,
+        message.endpointIds,
+        message.leaseToken,
+      );
+    }
     return true;
   }
 
@@ -311,7 +385,6 @@ async function persistEvaluatedEndpoints(
   now = Date.now(),
 ): Promise<void> {
   const maxContentAgeDays = positiveNumber(env.MAX_CONTENT_AGE_DAYS, 7);
-  const maxLastSeenMinutes = nonNegativeNumber(env.MAX_LAST_SEEN_MINUTES, 0);
   const evaluations = new Map<string, Evaluation>();
 
   for (const endpoint of endpoints) {
@@ -321,7 +394,6 @@ async function persistEvaluatedEndpoints(
         endpoint,
         now,
         maxContentAgeDays,
-        maxLastSeenMinutes,
       ),
     );
   }
@@ -348,9 +420,14 @@ async function enqueueDiscoveries(
 async function enqueueRefreshes(
   queue: Queue<RefreshMessage>,
   endpointIds: string[],
+  leaseToken?: string,
 ): Promise<void> {
   const messages = chunk([...new Set(endpointIds)], 100).map((ids) => ({
-    body: { type: "refresh", endpointIds: ids } satisfies RefreshMessage,
+    body: {
+      type: "refresh",
+      endpointIds: ids,
+      ...(leaseToken ? { leaseToken } : {}),
+    } satisfies RefreshMessage,
   }));
   await sendQueueMessages(queue, messages);
 }
@@ -378,13 +455,13 @@ async function sendQueueMessages(
 }
 
 async function getHealth(db: D1Database): Promise<Response> {
-  const row = await db
+  const result = await db
     .prepare(
-      `SELECT status, last_success_at, last_error_at, updated_at
-       FROM integration_status WHERE name = 'cortex'`,
+      `SELECT name, status, message, last_success_at, last_error_at, updated_at
+       FROM integration_status ORDER BY name`,
     )
-    .first();
-  return json({ status: "ok", cortex: row ?? { status: "unknown" } });
+    .all();
+  return json({ status: "ok", integrations: result.results });
 }
 
 async function readRequestJson(request: Request, maximum: number): Promise<unknown> {
@@ -494,11 +571,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function positiveNumber(value: string, fallback: number): number {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : fallback;
-}
-
-function nonNegativeNumber(value: string, fallback: number): number {
-  const number = Number(value);
-  return Number.isFinite(number) && number >= 0 ? number : fallback;
 }
 
 function chunk<T>(values: T[], size: number): T[][] {

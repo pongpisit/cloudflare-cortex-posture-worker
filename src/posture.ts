@@ -8,18 +8,9 @@ export function evaluateEndpoint(
   endpoint: CortexEndpoint | null,
   now: number,
   maxContentAgeDays: number,
-  maxLastSeenMinutes: number,
 ): Evaluation {
   if (!endpoint) {
     return { score: 0, reason: "endpoint_not_found_or_ambiguous" };
-  }
-
-  const status = String(endpoint.operational_status ?? "").toLowerCase();
-  if (status !== "protected") {
-    return {
-      score: 0,
-      reason: `operational_status_${status || "missing"}`,
-    };
   }
 
   const lastContentUpdate = normalizeTimestamp(
@@ -37,20 +28,7 @@ export function evaluateEndpoint(
     return { score: 0, reason: "content_older_than_allowed" };
   }
 
-  if (maxLastSeenMinutes > 0) {
-    const lastSeen = normalizeTimestamp(endpoint.last_seen);
-    if (!lastSeen) {
-      return { score: 0, reason: "last_seen_missing" };
-    }
-    if (lastSeen > now + 5 * 60_000) {
-      return { score: 0, reason: "last_seen_in_future" };
-    }
-    if (now - lastSeen > maxLastSeenMinutes * 60_000) {
-      return { score: 0, reason: "endpoint_not_seen_recently" };
-    }
-  }
-
-  return { score: 100, reason: "protected_and_content_fresh" };
+  return { score: 100, reason: "content_fresh" };
 }
 
 export function findCortexEndpoint(

@@ -1,14 +1,12 @@
 flowchart LR
   D[Managed device\nCloudflare One Client] --> CF[Custom service provider]
-  CF -->|Device identity| W[Posture Worker]
-  A[Access] -->|Signed device identity| W
-  G[Gateway Network policy] -->|Internal L4 context| GW[Route-less Gateway Worker]
-  W -->|Device ID lookup| DB[(D1\nMappings and snapshots)]
-  GW -->|Unique source-IP lookup| DB
-  W -->|Score or signed boolean| A
-  GW -->|Number 0 or 100| G
+  CF -->|Device ID, serial, hostname, MAC| W[Posture Worker]
+  W -->|Mapping and snapshot lookup| DB[(D1\nMappings and snapshots)]
   CRON[Cron trigger\nevery 5 min] --> Q[Cloudflare Queue\nBatched refresh jobs]
+  CRON -->|Fresh compliance decisions| L[Zero Trust SERIAL list]
   W -->|Unknown device discovery| Q
   Q -->|endpoint_id_list\nup to 100| X[Cortex XDR API]
   X -->|Endpoint state| Q
-  Q -->|Verified mapping and score| DB
+  Q -->|Verified mapping and content time| DB
+  L --> A[Access Block policy]
+  L --> G[Gateway Block policy]

@@ -19,11 +19,20 @@ interface EvaluationRow {
   hostname: string;
   verified_mac: string;
   serial_number: string | null;
-  virtual_ipv4: string | null;
 }
 
 interface EndpointIdRow {
   cortex_endpoint_id: string;
+}
+
+interface SerialDecisionRow {
+  serial_number: string;
+  noncompliant: number;
+}
+
+export interface SerialComplianceDecision {
+  serialNumber: string;
+  noncompliant: boolean;
 }
 
 export async function getStoredEvaluations(
@@ -38,7 +47,7 @@ export async function getStoredEvaluations(
     const query = `
       SELECT m.cloudflare_device_id, m.cortex_endpoint_id,
              s.score, s.reason, s.cortex_refreshed_at,
-             m.hostname, m.verified_mac, m.serial_number, m.virtual_ipv4
+              m.hostname, m.verified_mac, m.serial_number
       FROM device_mappings m
       LEFT JOIN endpoint_snapshots s
         ON s.cortex_endpoint_id = m.cortex_endpoint_id
@@ -61,72 +70,11 @@ export async function getStoredEvaluations(
         hostname: row.hostname,
         verifiedMac: row.verified_mac,
         serialNumber: row.serial_number,
-        virtualIpv4: row.virtual_ipv4,
       });
     }
   }
 
   return evaluations;
-}
-
-export async function getStoredEvaluationByVirtualIp(
-  db: D1Database,
-  virtualIp: string,
-  verifiedAfter: number,
-): Promise<StoredEvaluation | null> {
-  const result = await db
-    .prepare(
-      `SELECT m.cloudflare_device_id, m.cortex_endpoint_id,
-              s.score, s.reason, s.cortex_refreshed_at,
-              m.hostname, m.verified_mac, m.serial_number, m.virtual_ipv4
-       FROM device_mappings m
-       LEFT JOIN endpoint_snapshots s
-         ON s.cortex_endpoint_id = m.cortex_endpoint_id
-       WHERE m.status = 'verified'
-         AND m.virtual_ipv4 = ?
-         AND m.last_verified_at >= ?
-       LIMIT 2`,
-    )
-    .bind(virtualIp, verifiedAfter)
-    .all<EvaluationRow>();
-
-  if (result.results.length !== 1) return null;
-  const row = result.results[0]!;
-  return {
-    cloudflareDeviceId: row.cloudflare_device_id,
-    cortexEndpointId: row.cortex_endpoint_id,
-    score: row.score,
-    reason: row.reason,
-    cortexRefreshedAt: row.cortex_refreshed_at,
-    hostname: row.hostname,
-    verifiedMac: row.verified_mac,
-    serialNumber: row.serial_number,
-    virtualIpv4: row.virtual_ipv4,
-  };
-}
-
-export async function updateDeviceVirtualIps(
-  db: D1Database,
-  devices: Array<{ deviceId: string; virtualIpv4: string | null }>,
-  observationId: string,
-): Promise<void> {
-  const now = Date.now();
-  const statements = devices.map(({ deviceId, virtualIpv4 }) =>
-    db
-      .prepare(
-        `UPDATE device_mappings
-         SET virtual_ipv4 = ?, updated_at = ?, last_verified_at = ?
-         WHERE cloudflare_device_id = ?
-           AND status = 'verified'
-           AND EXISTS (
-             SELECT 1 FROM device_observations o
-             WHERE o.cloudflare_device_id = device_mappings.cloudflare_device_id
-               AND o.observation_id = ?
-           )`,
-      )
-      .bind(virtualIpv4, now, now, deviceId, observationId),
-  );
-  for (const batch of chunk(statements, 100)) await db.batch(batch);
 }
 
 export async function invalidateDeviceMappings(
@@ -135,11 +83,26 @@ export async function invalidateDeviceMappings(
   observationId: string,
 ): Promise<void> {
   const now = Date.now();
-  const statements = deviceIds.map((deviceId) =>
+  const statements = deviceIds.flatMap((deviceId) => [
+    db
+      .prepare(
+        `INSERT INTO serial_removals(serial_number, observed_at)
+         SELECT TRIM(serial_number), ? FROM device_mappings
+         WHERE cloudflare_device_id = ?
+           AND serial_number IS NOT NULL AND TRIM(serial_number) != ''
+           AND EXISTS (
+             SELECT 1 FROM device_observations o
+             WHERE o.cloudflare_device_id = device_mappings.cloudflare_device_id
+               AND o.observation_id = ?
+           )
+         ON CONFLICT(serial_number) DO UPDATE SET
+           observed_at = MAX(serial_removals.observed_at, excluded.observed_at)`,
+      )
+      .bind(now, deviceId, observationId),
     db
       .prepare(
         `UPDATE device_mappings
-         SET status = 'invalid', virtual_ipv4 = NULL, updated_at = ?
+         SET status = 'invalid', updated_at = ?
          WHERE cloudflare_device_id = ?
            AND EXISTS (
              SELECT 1 FROM device_observations o
@@ -148,7 +111,7 @@ export async function invalidateDeviceMappings(
            )`,
       )
       .bind(now, deviceId, observationId),
-  );
+  ]);
   for (const batch of chunk(statements, 100)) await db.batch(batch);
 }
 
@@ -183,7 +146,13 @@ export async function claimDueEndpointIds(
   cutoff: number,
   afterId: string,
   limit: number,
-): Promise<string[]> {
+): Promise<{
+  endpointIds: string[];
+  nextAfterId: string;
+  leaseToken: string;
+}> {
+  const claimedAt = Date.now();
+  const leaseToken = crypto.randomUUID();
   const result = await db
     .prepare(
       `SELECT DISTINCT m.cortex_endpoint_id
@@ -199,22 +168,133 @@ export async function claimDueEndpointIds(
        ORDER BY m.cortex_endpoint_id
        LIMIT ?`,
     )
-    .bind(afterId, cutoff, Date.now(), limit)
+    .bind(afterId, cutoff, claimedAt, limit)
     .all<EndpointIdRow>();
   const endpointIds = result.results.map((row) => row.cortex_endpoint_id);
-  const leasedUntil = Date.now() + 15 * 60_000;
+  const leasedUntil = claimedAt + 15 * 60_000;
   const leases = endpointIds.map((endpointId) =>
     db
       .prepare(
-        `INSERT INTO refresh_leases(cortex_endpoint_id, leased_until)
-         VALUES (?, ?)
+        `INSERT INTO refresh_leases(cortex_endpoint_id, leased_until, lease_token)
+         VALUES (?, ?, ?)
          ON CONFLICT(cortex_endpoint_id) DO UPDATE SET
-           leased_until = excluded.leased_until`,
+           leased_until = excluded.leased_until,
+           lease_token = excluded.lease_token
+         WHERE refresh_leases.leased_until <= ?`,
       )
-      .bind(endpointId, leasedUntil),
+      .bind(endpointId, leasedUntil, leaseToken, claimedAt),
   );
   for (const batch of chunk(leases, 100)) await db.batch(batch);
-  return endpointIds;
+  const claimedIds: string[] = [];
+  for (const ids of chunk(endpointIds, 80)) {
+    const placeholders = ids.map(() => "?").join(",");
+    const claimed = await db
+      .prepare(
+        `SELECT cortex_endpoint_id FROM refresh_leases
+         WHERE lease_token = ?
+           AND cortex_endpoint_id IN (${placeholders})`,
+      )
+      .bind(leaseToken, ...ids)
+      .all<EndpointIdRow>();
+    claimedIds.push(...claimed.results.map((row) => row.cortex_endpoint_id));
+  }
+  return {
+    endpointIds: claimedIds,
+    nextAfterId: endpointIds.at(-1) ?? afterId,
+    leaseToken,
+  };
+}
+
+export async function getSerialComplianceDecisions(
+  db: D1Database,
+  maximumContentAge: number,
+  refreshedAfter: number,
+): Promise<SerialComplianceDecision[]> {
+  const result = await db
+    .prepare(
+      `SELECT TRIM(m.serial_number) AS serial_number,
+              MAX(CASE
+                 WHEN s.last_content_update_time > 0
+                  AND s.last_content_update_time < s.cortex_refreshed_at - ? THEN 1
+                ELSE 0
+              END) AS noncompliant
+       FROM device_mappings m
+       LEFT JOIN endpoint_snapshots s
+         ON s.cortex_endpoint_id = m.cortex_endpoint_id
+       WHERE m.status = 'verified'
+         AND m.serial_number IS NOT NULL
+         AND TRIM(m.serial_number) != ''
+       GROUP BY TRIM(m.serial_number)
+       HAVING COUNT(s.cortex_endpoint_id) = COUNT(*)
+          AND MIN(s.cortex_refreshed_at) >= ?
+       UNION ALL
+       SELECT r.serial_number, 0 AS noncompliant
+       FROM serial_removals r
+       WHERE NOT EXISTS (
+         SELECT 1 FROM device_mappings m
+         WHERE m.status = 'verified'
+           AND TRIM(m.serial_number) = r.serial_number
+       )
+       ORDER BY serial_number`,
+    )
+    .bind(maximumContentAge, refreshedAfter)
+    .all<SerialDecisionRow>();
+  return result.results.map((row) => ({
+    serialNumber: row.serial_number,
+    noncompliant: row.noncompliant === 1,
+  }));
+}
+
+export async function updateVerifiedDeviceSerials(
+  db: D1Database,
+  devices: Array<{ deviceId: string; serialNumber: string | null }>,
+  observationId: string,
+  observedAt: number,
+): Promise<void> {
+  const statements = devices.flatMap(({ deviceId, serialNumber }) => [
+    db
+      .prepare(
+        `INSERT INTO serial_removals(serial_number, observed_at)
+         SELECT TRIM(serial_number), ? FROM device_mappings
+         WHERE cloudflare_device_id = ?
+           AND serial_number IS NOT NULL AND TRIM(serial_number) != ''
+           AND TRIM(serial_number) != COALESCE(?, '')
+           AND EXISTS (
+             SELECT 1 FROM device_observations o
+             WHERE o.cloudflare_device_id = device_mappings.cloudflare_device_id
+               AND o.observation_id = ?
+           )
+         ON CONFLICT(serial_number) DO UPDATE SET
+           observed_at = MAX(serial_removals.observed_at, excluded.observed_at)`,
+      )
+      .bind(observedAt, deviceId, serialNumber, observationId),
+    db
+      .prepare(
+        `UPDATE device_mappings
+         SET serial_number = ?, updated_at = ?, last_verified_at = ?
+         WHERE cloudflare_device_id = ?
+           AND status = 'verified'
+           AND EXISTS (
+             SELECT 1 FROM device_observations o
+             WHERE o.cloudflare_device_id = device_mappings.cloudflare_device_id
+               AND o.observation_id = ?
+           )`,
+      )
+      .bind(serialNumber, observedAt, observedAt, deviceId, observationId),
+    db
+      .prepare(
+        `DELETE FROM serial_removals
+         WHERE serial_number = ?
+           AND EXISTS (
+             SELECT 1 FROM device_mappings m
+             WHERE m.cloudflare_device_id = ?
+               AND m.status = 'verified'
+               AND TRIM(m.serial_number) = ?
+           )`,
+      )
+      .bind(serialNumber, deviceId, serialNumber),
+  ]);
+  for (const batch of chunk(statements, 100)) await db.batch(batch);
 }
 
 export async function saveEndpointSnapshots(
@@ -237,15 +317,16 @@ export async function saveEndpointSnapshots(
            last_content_update_time, last_seen, score, reason,
            cortex_refreshed_at, updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(cortex_endpoint_id) DO UPDATE SET
+          ON CONFLICT(cortex_endpoint_id) DO UPDATE SET
            endpoint_name = excluded.endpoint_name,
            operational_status = excluded.operational_status,
            last_content_update_time = excluded.last_content_update_time,
            last_seen = excluded.last_seen,
            score = excluded.score,
-           reason = excluded.reason,
-           cortex_refreshed_at = excluded.cortex_refreshed_at,
-           updated_at = excluded.updated_at`,
+            reason = excluded.reason,
+            cortex_refreshed_at = excluded.cortex_refreshed_at,
+            updated_at = excluded.updated_at
+          WHERE excluded.cortex_refreshed_at >= endpoint_snapshots.cortex_refreshed_at`,
       )
       .bind(
         endpoint.endpoint_id,
@@ -261,10 +342,6 @@ export async function saveEndpointSnapshots(
   });
 
   for (const batch of chunk(statements, 100)) await db.batch(batch);
-  await releaseRefreshLeases(
-    db,
-    endpoints.map((endpoint) => endpoint.endpoint_id),
-  );
 }
 
 export async function saveDeviceMappings(
@@ -273,34 +350,50 @@ export async function saveDeviceMappings(
   observationId: string,
   observedAt: number,
 ): Promise<void> {
-  const statements = mappings.map(({ device, endpoint }) => {
+  const statements = mappings.flatMap(({ device, endpoint }) => {
     const deviceMacs = normalizeMacCollection(device.mac_address);
     const endpointMacs = normalizeMacCollection(endpoint.mac_address);
     const verifiedMac = [...deviceMacs].find((mac) => endpointMacs.has(mac)) ?? "";
-    return db.prepare(
+    const serialNumber = device.serial_number?.trim() || null;
+    return [
+      db
+        .prepare(
+          `INSERT INTO serial_removals(serial_number, observed_at)
+           SELECT TRIM(serial_number), ? FROM device_mappings
+           WHERE cloudflare_device_id = ?
+             AND serial_number IS NOT NULL AND TRIM(serial_number) != ''
+             AND TRIM(serial_number) != COALESCE(?, '')
+             AND EXISTS (
+               SELECT 1 FROM device_observations o
+               WHERE o.cloudflare_device_id = device_mappings.cloudflare_device_id
+                 AND o.observation_id = ?
+             )
+           ON CONFLICT(serial_number) DO UPDATE SET
+             observed_at = MAX(serial_removals.observed_at, excluded.observed_at)`,
+        )
+        .bind(observedAt, device.device_id, serialNumber, observationId),
+      db.prepare(
       `INSERT INTO device_mappings(
-          cloudflare_device_id, serial_number, virtual_ipv4, cortex_endpoint_id,
+          cloudflare_device_id, serial_number, cortex_endpoint_id,
           hostname, verified_mac, status, created_at, updated_at,
           last_verified_at
         )
-        SELECT ?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?
+        SELECT ?, ?, ?, ?, ?, 'verified', ?, ?, ?
         WHERE EXISTS (
           SELECT 1 FROM device_observations o
           WHERE o.cloudflare_device_id = ? AND o.observation_id = ?
         )
         ON CONFLICT(cloudflare_device_id) DO UPDATE SET
           serial_number = excluded.serial_number,
-          virtual_ipv4 = excluded.virtual_ipv4,
           cortex_endpoint_id = excluded.cortex_endpoint_id,
           hostname = excluded.hostname,
           verified_mac = excluded.verified_mac,
           status = 'verified',
           updated_at = excluded.updated_at,
           last_verified_at = excluded.last_verified_at`,
-    ).bind(
+      ).bind(
       device.device_id,
-      device.serial_number ?? null,
-      device.virtual_ipv4 ?? null,
+      serialNumber,
       endpoint.endpoint_id,
       normalizeHostname(device.hostname),
       verifiedMac,
@@ -309,7 +402,20 @@ export async function saveDeviceMappings(
       observedAt,
       device.device_id,
       observationId,
-    );
+      ),
+      db
+        .prepare(
+          `DELETE FROM serial_removals
+           WHERE serial_number = ?
+             AND EXISTS (
+               SELECT 1 FROM device_mappings m
+               WHERE m.cloudflare_device_id = ?
+                 AND m.status = 'verified'
+                 AND TRIM(m.serial_number) = ?
+             )`,
+        )
+        .bind(serialNumber, device.device_id, serialNumber),
+    ];
   });
   for (const batch of chunk(statements, 100)) await db.batch(batch);
 }
@@ -327,14 +433,15 @@ export async function markMissingEndpoints(
            last_content_update_time, last_seen, score, reason,
            cortex_refreshed_at, updated_at
          ) VALUES (?, '', 'missing', 0, 0, 0, 'endpoint_missing', ?, ?)
-         ON CONFLICT(cortex_endpoint_id) DO UPDATE SET
-           operational_status = 'missing', score = 0,
-           reason = 'endpoint_missing', cortex_refreshed_at = ?, updated_at = ?`,
+          ON CONFLICT(cortex_endpoint_id) DO UPDATE SET
+            operational_status = 'missing', last_content_update_time = 0,
+            last_seen = 0, score = 0, reason = 'endpoint_missing',
+            cortex_refreshed_at = ?, updated_at = ?
+          WHERE excluded.cortex_refreshed_at >= endpoint_snapshots.cortex_refreshed_at`,
       )
       .bind(endpointId, now, now, now, now),
   );
   for (const batch of chunk(statements, 100)) await db.batch(batch);
-  await releaseRefreshLeases(db, endpointIds);
 }
 
 export async function recordCortexSuccess(
@@ -366,17 +473,104 @@ export async function recordCortexError(
     .run();
 }
 
-async function releaseRefreshLeases(
+export async function recordListSyncSuccess(
+  db: D1Database,
+  count: number,
+  now: number,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO integration_status(
+         name, status, message, last_success_at, updated_at
+       ) VALUES ('cloudflare_serial_list', 'healthy', ?, ?, ?)
+       ON CONFLICT(name) DO UPDATE SET
+         status = excluded.status, message = excluded.message,
+         last_success_at = excluded.last_success_at,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(`${count} noncompliant serials`, now, now)
+    .run();
+}
+
+export async function recordListSyncError(
+  db: D1Database,
+  message: string,
+  now: number,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO integration_status(
+         name, status, message, last_error_at, updated_at
+       ) VALUES ('cloudflare_serial_list', 'degraded', ?, ?, ?)
+       ON CONFLICT(name) DO UPDATE SET
+         status = excluded.status, message = excluded.message,
+         last_error_at = excluded.last_error_at,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(message.slice(0, 500), now, now)
+    .run();
+}
+
+export async function claimSyncLease(
+  db: D1Database,
+  name: string,
+  now: number,
+): Promise<string | null> {
+  const token = crypto.randomUUID();
+  const result = await db
+    .prepare(
+      `INSERT INTO sync_leases(name, lease_token, leased_until)
+       VALUES (?, ?, ?)
+       ON CONFLICT(name) DO UPDATE SET
+         lease_token = excluded.lease_token,
+         leased_until = excluded.leased_until
+       WHERE sync_leases.leased_until <= ?`,
+    )
+    .bind(name, token, now + 15 * 60_000, now)
+    .run();
+  return result.meta.changes === 1 ? token : null;
+}
+
+export async function releaseSyncLease(
+  db: D1Database,
+  name: string,
+  token: string,
+): Promise<void> {
+  await db
+    .prepare(`DELETE FROM sync_leases WHERE name = ? AND lease_token = ?`)
+    .bind(name, token)
+    .run();
+}
+
+export async function clearSerialRemovals(
+  db: D1Database,
+  serialNumbers: string[],
+): Promise<void> {
+  for (const values of chunk(serialNumbers, 80)) {
+    const placeholders = values.map(() => "?").join(",");
+    await db
+      .prepare(
+        `DELETE FROM serial_removals WHERE serial_number IN (${placeholders})`,
+      )
+      .bind(...values)
+      .run();
+  }
+}
+
+export async function releaseRefreshLeases(
   db: D1Database,
   endpointIds: string[],
+  leaseToken: string,
 ): Promise<void> {
   for (const ids of chunk(endpointIds, 80)) {
     const placeholders = ids.map(() => "?").join(",");
     await db
       .prepare(
-        `DELETE FROM refresh_leases WHERE cortex_endpoint_id IN (${placeholders})`,
+        `DELETE FROM refresh_leases
+         WHERE lease_token = ?
+           AND cortex_endpoint_id IN (${placeholders})`,
       )
-      .bind(...ids)
+      .bind(leaseToken, ...ids)
       .run();
   }
 }

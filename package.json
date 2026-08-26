@@ -5,11 +5,10 @@
   "type": "module",
   "scripts": {
     "check": "npm run types && npm run typecheck && npm run lint && npm test && npm run deploy:dry",
-    "deploy": "wrangler deploy && wrangler deploy -c wrangler.gateway.jsonc",
-    "deploy:dry": "wrangler deploy --dry-run && wrangler deploy --dry-run -c wrangler.gateway.jsonc",
+    "deploy": "wrangler deploy",
+    "deploy:dry": "wrangler deploy --dry-run",
     "dev": "wrangler dev --test-scheduled",
     "lint": "oxlint --deny-warnings src test",
-    "key:external-evaluation": "node scripts/generate-external-evaluation-key.mjs",
     "migrate:local": "wrangler d1 migrations apply cortex-posture --local",
     "migrate:remote": "wrangler d1 migrations apply cortex-posture --remote",
     "test": "vitest run",

@@ -27,24 +27,10 @@ export interface StoredEvaluation {
   hostname: string;
   verifiedMac: string;
   serialNumber: string | null;
-  virtualIpv4: string | null;
-}
-
-export interface GatewayContext {
-  src_ip: string;
-  src_port: number;
-  dst_ip: string;
-  dst_port: number;
-  protocol: string;
-  detected_protocol?: string | null;
-  sni: string;
-  vnet_id?: string | null;
-  proxy_endpoint?: string | null;
-  account_tag: string;
 }
 
 export type RefreshMessage =
-  | { type: "refresh"; endpointIds: string[] }
+  | { type: "refresh"; endpointIds: string[]; leaseToken?: string }
   | {
       type: "discover";
       devices: CloudflareDevice[];

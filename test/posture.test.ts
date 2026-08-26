@@ -63,9 +63,9 @@ describe("Cortex matching", () => {
 
 describe("posture evaluation", () => {
   it("passes protected endpoints with content under seven days", () => {
-    expect(evaluateEndpoint(endpoint(), now, 7, 30)).toEqual({
+    expect(evaluateEndpoint(endpoint(), now, 7)).toEqual({
       score: 100,
-      reason: "protected_and_content_fresh",
+      reason: "content_fresh",
     });
   });
 
@@ -75,41 +75,17 @@ describe("posture evaluation", () => {
         endpoint({ last_content_update_time: now - 8 * 86_400_000 }),
         now,
         7,
-        0,
       ),
     ).toEqual({ score: 0, reason: "content_older_than_allowed" });
   });
 
-  it("fails an unprotected endpoint", () => {
+  it("ignores operational status", () => {
     expect(
       evaluateEndpoint(
         endpoint({ operational_status: "unprotected" }),
         now,
         7,
-        0,
       ),
-    ).toEqual({ score: 0, reason: "operational_status_unprotected" });
-  });
-
-  it("enforces optional last-seen freshness", () => {
-    expect(
-      evaluateEndpoint(
-        endpoint({ last_seen: now - 31 * 60_000 }),
-        now,
-        7,
-        30,
-      ),
-    ).toEqual({ score: 0, reason: "endpoint_not_seen_recently" });
-  });
-
-  it("rejects a future last-seen timestamp beyond clock skew", () => {
-    expect(
-      evaluateEndpoint(
-        endpoint({ last_seen: now + 6 * 60_000 }),
-        now,
-        7,
-        30,
-      ),
-    ).toEqual({ score: 0, reason: "last_seen_in_future" });
+    ).toEqual({ score: 100, reason: "content_fresh" });
   });
 });
