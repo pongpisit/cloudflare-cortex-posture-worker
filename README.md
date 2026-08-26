@@ -253,6 +253,8 @@ denial. Membership without a fresh decision is preserved, and durable removal
 tombstones clear serials that are changed or invalidated. The Worker skips the
 PUT when nothing changed, rechecks decisions after publication, and uses a D1
 lease to prevent overlapping Cron runs from replacing the list concurrently.
+Managed serial entries include `hostname=<name>; mac=<address>` descriptions so
+operators can identify devices directly from the Zero Trust list.
 
 ## Policy Setup
 

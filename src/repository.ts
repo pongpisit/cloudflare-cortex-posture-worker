@@ -28,11 +28,14 @@ interface EndpointIdRow {
 interface SerialDecisionRow {
   serial_number: string;
   noncompliant: number;
+  hostname: string | null;
+  verified_mac: string | null;
 }
 
 export interface SerialComplianceDecision {
   serialNumber: string;
   noncompliant: boolean;
+  description?: string;
 }
 
 export async function getStoredEvaluations(
@@ -217,7 +220,9 @@ export async function getSerialComplianceDecisions(
                  WHEN s.last_content_update_time > 0
                   AND s.last_content_update_time < s.cortex_refreshed_at - ? THEN 1
                 ELSE 0
-              END) AS noncompliant
+              END) AS noncompliant,
+              MAX(m.hostname) AS hostname,
+              MAX(m.verified_mac) AS verified_mac
        FROM device_mappings m
        LEFT JOIN endpoint_snapshots s
          ON s.cortex_endpoint_id = m.cortex_endpoint_id
@@ -228,7 +233,8 @@ export async function getSerialComplianceDecisions(
        HAVING COUNT(s.cortex_endpoint_id) = COUNT(*)
           AND MIN(s.cortex_refreshed_at) >= ?
        UNION ALL
-       SELECT r.serial_number, 0 AS noncompliant
+       SELECT r.serial_number, 0 AS noncompliant,
+              NULL AS hostname, NULL AS verified_mac
        FROM serial_removals r
        WHERE NOT EXISTS (
          SELECT 1 FROM device_mappings m
@@ -242,6 +248,9 @@ export async function getSerialComplianceDecisions(
   return result.results.map((row) => ({
     serialNumber: row.serial_number,
     noncompliant: row.noncompliant === 1,
+    ...(row.hostname || row.verified_mac
+      ? { description: deviceDescription(row.hostname, row.verified_mac) }
+      : {}),
   }));
 }
 
@@ -581,4 +590,17 @@ function chunk<T>(values: T[], size: number): T[][] {
     result.push(values.slice(index, index + size));
   }
   return result;
+}
+
+function deviceDescription(
+  hostname: string | null,
+  normalizedMac: string | null,
+): string {
+  const parts: string[] = [];
+  if (hostname) parts.push(`hostname=${hostname}`);
+  if (normalizedMac) {
+    const mac = normalizedMac.match(/.{2}/g)?.join(":") ?? normalizedMac;
+    parts.push(`mac=${mac}`);
+  }
+  return parts.join("; ");
 }

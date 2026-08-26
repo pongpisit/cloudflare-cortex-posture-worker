@@ -10,6 +10,7 @@ const EMPTY_LIST_SENTINEL = "__cortex_no_noncompliant_devices__";
 
 interface ListItem {
   value?: string;
+  description?: string;
 }
 
 interface ZeroTrustList {
@@ -96,17 +97,23 @@ export async function syncSerialList(
 ): Promise<SerialListSyncResult> {
   requireConfiguration(env);
   const current = await getList(env);
-  const currentItems = listItems(current).filter(
-    (value) => value !== EMPTY_LIST_SENTINEL,
+  const currentItems = listItems(current);
+  const desired = new Map(
+    currentItems
+      .filter((item) => item.value !== EMPTY_LIST_SENTINEL)
+      .map((item) => [item.value, item.description] as const),
   );
-  const desired = new Set(currentItems);
   for (const decision of decisions) {
     const serial = decision.serialNumber.trim();
     if (!serial) continue;
-    if (decision.noncompliant) desired.add(serial);
+    if (decision.noncompliant) {
+      desired.set(serial, decision.description ?? desired.get(serial) ?? "");
+    }
     else desired.delete(serial);
   }
-  const serials = [...desired].sort();
+  const serials = [...desired.keys()].sort((left, right) =>
+    left.localeCompare(right),
+  );
   const maximumItems = positiveInteger(env.CLOUDFLARE_LIST_MAX_ITEMS, 1000);
   if (serials.length > maximumItems) {
     throw new Error(
@@ -123,7 +130,18 @@ export async function syncSerialList(
     );
   }
 
-  const desiredItems = serials.length > 0 ? serials : [EMPTY_LIST_SENTINEL];
+  const desiredItems: ListItem[] =
+    serials.length > 0
+      ? serials.map((value) => ({
+          value,
+          ...(desired.get(value) ? { description: desired.get(value) } : {}),
+        }))
+      : [
+          {
+            value: EMPTY_LIST_SENTINEL,
+            description: "No noncompliant Cortex devices",
+          },
+        ];
   if (sameValues(listItems(current), desiredItems)) {
     return { changed: false, count: serials.length };
   }
@@ -131,7 +149,7 @@ export async function syncSerialList(
   await callCloudflare(env, "PUT", {
     name: env.CLOUDFLARE_SERIAL_LIST_NAME,
     description: "Cortex endpoints with stale security content; managed by Worker",
-    items: desiredItems.map((value) => ({ value })),
+    items: desiredItems,
   });
   const verified = await getList(env);
   if (!sameValues(listItems(verified), desiredItems)) {
@@ -252,11 +270,18 @@ function validateList(
   }
 }
 
-function listItems(list: ZeroTrustList): string[] {
+function listItems(list: ZeroTrustList): Required<ListItem>[] {
   if (!Array.isArray(list.items)) {
     throw new Error("Cloudflare Zero Trust list response did not include items");
   }
-  return normalizeSerials(list.items.map((item) => item.value ?? ""));
+  const items = new Map<string, string>();
+  for (const item of list.items) {
+    const value = item.value?.trim();
+    if (value) items.set(value, item.description?.trim() ?? "");
+  }
+  return [...items.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([value, description]) => ({ value, description }));
 }
 
 function requireConfiguration(
@@ -276,12 +301,16 @@ function requireConfiguration(
   }
 }
 
-function normalizeSerials(values: string[]): string[] {
-  return [...new Set(values.map((value) => value.trim()).filter(Boolean))].sort();
-}
-
-function sameValues(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
+function sameValues(left: ListItem[], right: ListItem[]): boolean {
+  return (
+    left.length === right.length &&
+    left.every(
+      (item, index) =>
+        item.value?.trim() === right[index]?.value?.trim() &&
+        (item.description?.trim() ?? "") ===
+          (right[index]?.description?.trim() ?? ""),
+    )
+  );
 }
 
 function sameDecisions(
@@ -293,7 +322,8 @@ function sameDecisions(
     left.every(
       (decision, index) =>
         decision.serialNumber === right[index]?.serialNumber &&
-        decision.noncompliant === right[index]?.noncompliant,
+        decision.noncompliant === right[index]?.noncompliant &&
+        decision.description === right[index]?.description,
     )
   );
 }

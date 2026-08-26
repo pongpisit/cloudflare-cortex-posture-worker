@@ -9,7 +9,9 @@ const env = {
   CLOUDFLARE_API_TOKEN: "secret-token",
 };
 
-function reply(items: string[]): Response {
+function reply(
+  items: Array<string | { value: string; description?: string }>,
+): Response {
   return Response.json({
     success: true,
     errors: [],
@@ -18,7 +20,9 @@ function reply(items: string[]): Response {
       name: "Cortex noncompliant devices",
       type: "SERIAL",
       count: items.length,
-      items: items.map((value) => ({ value })),
+      items: items.map((item) =>
+        typeof item === "string" ? { value: item } : item,
+      ),
     },
   });
 }
@@ -109,7 +113,14 @@ describe("Cloudflare serial denylist", () => {
       .fn()
       .mockResolvedValueOnce(reply(["OLD-SERIAL"]))
       .mockResolvedValueOnce(reply([sentinel]))
-      .mockResolvedValueOnce(reply([sentinel]));
+      .mockResolvedValueOnce(
+        reply([
+          {
+            value: sentinel,
+            description: "No noncompliant Cortex devices",
+          },
+        ]),
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
@@ -145,6 +156,31 @@ describe("Cloudflare serial denylist", () => {
     expect(fetchMock).toHaveBeenLastCalledWith(
       "https://api.cloudflare.com/client/v4/accounts/account-1/gateway/lists/list-1/items",
       expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("publishes hostname and MAC as the serial item description", async () => {
+    const description = "hostname=laptop-1; mac=aa:bb:cc:dd:ee:ff";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(reply(["SERIAL-1"]))
+      .mockResolvedValueOnce(successReply())
+      .mockResolvedValueOnce(reply([{ value: "SERIAL-1", description }]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      syncSerialList(
+        [{ serialNumber: "SERIAL-1", noncompliant: true, description }],
+        env,
+      ),
+    ).resolves.toEqual({ changed: true, count: 1 });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      expect.objectContaining({
+        method: "PUT",
+        body: expect.stringContaining(description),
+      }),
     );
   });
 
