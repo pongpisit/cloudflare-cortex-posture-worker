@@ -604,3 +604,166 @@ function deviceDescription(
   }
   return parts.join("; ");
 }
+
+interface IntegrationStatusRow {
+  name: string;
+  status: string;
+  message: string | null;
+  last_success_at: number | null;
+  last_error_at: number | null;
+  updated_at: number | null;
+}
+
+export interface DashboardIntegration {
+  name: string;
+  status: string;
+  message: string | null;
+  lastSuccessAt: number | null;
+  lastErrorAt: number | null;
+  updatedAt: number | null;
+}
+
+export async function getDashboardIntegrations(
+  db: D1Database,
+): Promise<DashboardIntegration[]> {
+  const result = await db
+    .prepare(
+      `SELECT name, status, message, last_success_at, last_error_at, updated_at
+       FROM integration_status ORDER BY name`,
+    )
+    .all<IntegrationStatusRow>();
+  return result.results.map((row) => ({
+    name: row.name,
+    status: row.status,
+    message: row.message,
+    lastSuccessAt: row.last_success_at,
+    lastErrorAt: row.last_error_at,
+    updatedAt: row.updated_at,
+  }));
+}
+
+interface DeviceCountRow {
+  total: number;
+  verified: number;
+  invalid: number;
+}
+
+export interface DeviceCounts {
+  total: number;
+  verified: number;
+  invalid: number;
+}
+
+export async function getDeviceCounts(db: D1Database): Promise<DeviceCounts> {
+  const row = await db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN status = 'verified' THEN 1 ELSE 0 END) AS verified,
+              SUM(CASE WHEN status = 'invalid' THEN 1 ELSE 0 END) AS invalid
+       FROM device_mappings`,
+    )
+    .first<DeviceCountRow>();
+  return {
+    total: row?.total ?? 0,
+    verified: row?.verified ?? 0,
+    invalid: row?.invalid ?? 0,
+  };
+}
+
+export type DeviceComplianceFilter = "all" | "noncompliant" | "compliant";
+
+interface DeviceComplianceRow {
+  cloudflare_device_id: string;
+  serial_number: string | null;
+  hostname: string;
+  verified_mac: string | null;
+  mapping_status: string;
+  score: number | null;
+  reason: string | null;
+  last_content_update_time: number | null;
+  cortex_refreshed_at: number | null;
+}
+
+export interface DeviceCompliance {
+  cloudflareDeviceId: string;
+  serialNumber: string | null;
+  hostname: string;
+  verifiedMac: string | null;
+  mappingStatus: string;
+  score: number | null;
+  reason: string | null;
+  lastContentUpdateTime: number | null;
+  cortexRefreshedAt: number | null;
+  noncompliant: boolean;
+}
+
+const NONCOMPLIANT_EXPRESSION = `m.status = 'verified'
+       AND m.serial_number IS NOT NULL
+       AND TRIM(m.serial_number) != ''
+       AND s.last_content_update_time > 0
+       AND s.last_content_update_time < s.cortex_refreshed_at - ?`;
+
+export async function listDeviceCompliance(
+  db: D1Database,
+  maximumContentAge: number,
+  status: DeviceComplianceFilter,
+  limit: number,
+): Promise<DeviceCompliance[]> {
+  const where =
+    status === "noncompliant"
+      ? NONCOMPLIANT_EXPRESSION
+      : status === "compliant"
+        ? `NOT COALESCE((${NONCOMPLIANT_EXPRESSION}), 0)`
+        : "TRUE";
+  const result = await db
+    .prepare(
+      `SELECT m.cloudflare_device_id,
+              TRIM(m.serial_number) AS serial_number,
+              m.hostname,
+              m.verified_mac,
+              m.status AS mapping_status,
+              s.score,
+              s.reason,
+              s.last_content_update_time,
+              s.cortex_refreshed_at
+       FROM device_mappings m
+       LEFT JOIN endpoint_snapshots s
+         ON s.cortex_endpoint_id = m.cortex_endpoint_id
+       WHERE ${where}
+       ORDER BY CASE WHEN ${NONCOMPLIANT_EXPRESSION} THEN 0 ELSE 1 END,
+                m.hostname,
+                m.cloudflare_device_id
+       LIMIT ?`,
+    )
+    .bind(
+      ...(status === "all" ? [] : [maximumContentAge]),
+      maximumContentAge,
+      limit,
+    )
+    .all<DeviceComplianceRow>();
+  return result.results.map((row) => ({
+    cloudflareDeviceId: row.cloudflare_device_id,
+    serialNumber: row.serial_number,
+    hostname: row.hostname,
+    verifiedMac: row.verified_mac,
+    mappingStatus: row.mapping_status,
+    score: row.score,
+    reason: row.reason,
+    lastContentUpdateTime: row.last_content_update_time,
+    cortexRefreshedAt: row.cortex_refreshed_at,
+    noncompliant: isRowNoncompliant(row, maximumContentAge),
+  }));
+}
+
+function isRowNoncompliant(
+  row: DeviceComplianceRow,
+  maximumContentAge: number,
+): boolean {
+  return (
+    row.mapping_status === "verified" &&
+    !!row.serial_number &&
+    (row.last_content_update_time ?? 0) > 0 &&
+    (row.last_content_update_time ?? 0) <
+      (row.cortex_refreshed_at ?? 0) - maximumContentAge
+  );
+}

@@ -1,12 +1,17 @@
 import { AuthenticationError, validateAccessRequest } from "./auth";
 import { getEndpointsByHostnames, getEndpointsByIds } from "./cortex";
 import { reconcileNoncompliantSerialList } from "./cloudflare-list";
+import { dashboardPage } from "./dashboard";
 import { evaluateEndpoint, findCortexEndpoint, normalizeHostname } from "./posture";
 import {
   claimDueEndpointIds,
   claimSyncLease,
+  getDashboardIntegrations,
+  getDeviceCounts,
+  getSerialComplianceDecisions,
   getStoredEvaluations,
   invalidateDeviceMappings,
+  listDeviceCompliance,
   markMissingEndpoints,
   recordCortexError,
   recordCortexSuccess,
@@ -40,6 +45,21 @@ export default {
       if (url.pathname === "/health") {
         if (request.method !== "GET") return methodNotAllowed("GET");
         return getHealth(env.DB);
+      }
+
+      if (url.pathname === "/dashboard") {
+        if (request.method !== "GET") return methodNotAllowed("GET");
+        return dashboardPage();
+      }
+
+      if (url.pathname === "/api/overview") {
+        if (request.method !== "GET") return methodNotAllowed("GET");
+        return getApiOverview(env);
+      }
+
+      if (url.pathname === "/api/devices") {
+        if (request.method !== "GET") return methodNotAllowed("GET");
+        return getApiDevices(url, env);
       }
 
       if (url.pathname !== "/check") {
@@ -462,6 +482,62 @@ async function getHealth(db: D1Database): Promise<Response> {
     )
     .all();
   return json({ status: "ok", integrations: result.results });
+}
+
+async function getApiOverview(env: Env): Promise<Response> {
+  const now = Date.now();
+  const maximumAgeDays = positiveNumber(env.MAX_CONTENT_AGE_DAYS, 7);
+  const refreshMinutes = positiveNumber(env.SNAPSHOT_REFRESH_MINUTES, 5);
+  const [integrations, devices, decisions] = await Promise.all([
+    getDashboardIntegrations(env.DB),
+    getDeviceCounts(env.DB),
+    getSerialComplianceDecisions(
+      env.DB,
+      maximumAgeDays * 86_400_000,
+      now - refreshMinutes * 2 * 60_000,
+    ),
+  ]);
+  return json({
+    generated_at: now,
+    maximum_content_age_days: maximumAgeDays,
+    integrations,
+    devices,
+    noncompliant_serials: decisions.filter((decision) => decision.noncompliant)
+      .length,
+  });
+}
+
+async function getApiDevices(url: URL, env: Env): Promise<Response> {
+  const statusParam = url.searchParams.get("status") ?? "all";
+  if (
+    statusParam !== "all" &&
+    statusParam !== "noncompliant" &&
+    statusParam !== "compliant"
+  ) {
+    throw new ClientError(400, "invalid_status_filter");
+  }
+  const limitRaw = url.searchParams.get("limit");
+  let limit = 200;
+  if (limitRaw !== null) {
+    const parsed = Number(limitRaw);
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 500) {
+      throw new ClientError(400, "invalid_limit");
+    }
+    limit = parsed;
+  }
+  const maximumAgeDays = positiveNumber(env.MAX_CONTENT_AGE_DAYS, 7);
+  const devices = await listDeviceCompliance(
+    env.DB,
+    maximumAgeDays * 86_400_000,
+    statusParam,
+    limit,
+  );
+  return json({
+    generated_at: Date.now(),
+    status: statusParam,
+    limit,
+    devices,
+  });
 }
 
 async function readRequestJson(request: Request, maximum: number): Promise<unknown> {

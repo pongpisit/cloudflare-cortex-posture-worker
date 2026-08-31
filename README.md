@@ -338,6 +338,27 @@ timestamps. Relevant structured events include:
 The Worker refuses to update when the desired count exceeds
 `CLOUDFLARE_LIST_MAX_ITEMS` and warns at 80% capacity.
 
+## Dashboard
+
+`GET /dashboard` serves a read-only operations page behind the same Access
+application as `/check`. It shows integration health, device counts, the
+current noncompliant serial count, and a filterable device table (hostname,
+serial, MAC, score, reason, content age, refresh recency). The page refreshes
+every 60 seconds and makes no changes to data.
+
+JSON backing endpoints:
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /api/overview` | Integration statuses, device counts, noncompliant serial count |
+| `GET /api/devices?status=all\|noncompliant\|compliant&limit=N` | Per-device compliance rows, `limit` 1–500, default 200 |
+
+The service-token Access policy alone does not render a login page. To open the
+dashboard in a browser, add an Include rule to the Worker Access application
+for your administrator emails (or Identity Provider group) alongside the
+existing service-token rule. Do not remove the service-token rule, and keep the
+serial-denylist Block policy away from this application.
+
 ## Failure Model
 
 This design intentionally fails open for devices not already present in the
