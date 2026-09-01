@@ -2,10 +2,21 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 
 export class AuthenticationError extends Error {}
 
+// "access" (default) enforces Cloudflare Access JWT validation. "none" is an
+// explicit opt-out for initial setup before the Access application exists.
+export function authMode(env: Env): string {
+  return (
+    (env as Env & { AUTH_MODE?: string }).AUTH_MODE?.trim().toLowerCase() ||
+    "access"
+  );
+}
+
 export async function validateAccessRequest(
   request: Request,
   env: Env,
 ): Promise<void> {
+  if (authMode(env) === "none") return;
+
   if (
     !env.ACCESS_TEAM_DOMAIN ||
     env.ACCESS_TEAM_DOMAIN.includes("replace-me") ||

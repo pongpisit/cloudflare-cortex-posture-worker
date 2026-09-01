@@ -493,9 +493,15 @@ resolve remain unmapped.
 
 | Variable | Purpose |
 | --- | --- |
+| `AUTH_MODE` | `none` serves all endpoints without authentication during initial setup; the default (`access`) enforces Cloudflare Access |
 | `ACCESS_TEAM_DOMAIN` | Expected Access JWT issuer for the Worker's own API |
 | `ACCESS_AUD` | Bridge Access application audience |
 | `CORTEX_BASE_URL` | Cortex API HTTPS origin |
+
+While `AUTH_MODE=none`, every endpoint — including `/check` — is unauthenticated.
+Use it only before the Access application exists, then switch back to `access`
+when `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` are configured. The dashboard shows
+an `AUTH DISABLED` indicator while it is active.
 
 Secrets:
 

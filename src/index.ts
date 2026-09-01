@@ -1,4 +1,4 @@
-import { AuthenticationError, validateAccessRequest } from "./auth";
+import { authMode, AuthenticationError, validateAccessRequest } from "./auth";
 import { getEndpointsByHostnames, getEndpointsByIds } from "./cortex";
 import {
   listAvailableSerialLists,
@@ -52,7 +52,7 @@ export default {
 
       if (url.pathname === "/health") {
         if (request.method !== "GET") return methodNotAllowed("GET");
-        return getHealth(env.DB);
+        return await getHealth(env.DB);
       }
 
       if (url.pathname === "/dashboard") {
@@ -62,23 +62,23 @@ export default {
 
       if (url.pathname === "/api/overview") {
         if (request.method !== "GET") return methodNotAllowed("GET");
-        return getApiOverview(env);
+        return await getApiOverview(env);
       }
 
       if (url.pathname === "/api/devices") {
         if (request.method !== "GET") return methodNotAllowed("GET");
-        return getApiDevices(url, env);
+        return await getApiDevices(url, env);
       }
 
       if (url.pathname === "/api/settings") {
-        if (request.method === "GET") return getApiSettings(env);
-        if (request.method === "PUT") return putApiSettings(request, env);
+        if (request.method === "GET") return await getApiSettings(env);
+        if (request.method === "PUT") return await putApiSettings(request, env);
         return methodNotAllowed("GET, PUT");
       }
 
       if (url.pathname === "/api/cloudflare/lists") {
         if (request.method !== "GET") return methodNotAllowed("GET");
-        return getCloudflareLists(env);
+        return await getCloudflareLists(env);
       }
 
       if (url.pathname !== "/check") {
@@ -682,6 +682,7 @@ async function getApiSettings(env: Env): Promise<Response> {
   const settings = await getAppSettings(env.DB);
   return json({
     settings,
+    auth_mode: authMode(env),
     cloudflare_api_token_configured: Boolean(cloudflareApiToken(env)),
     cortex_configured: cortexConfigured(env),
     sync_ready: Boolean(

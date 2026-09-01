@@ -6,6 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "vars": {
+    "AUTH_MODE": "none",
     "ACCESS_TEAM_DOMAIN": "https://replace-me.cloudflareaccess.com",
     "ACCESS_AUD": "replace-with-access-application-aud",
     "CORTEX_BASE_URL": "https://replace-me.example.invalid"
