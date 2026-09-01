@@ -20,6 +20,7 @@ import {
   getDeviceMappingsByDeviceIds,
   getSerialComplianceDecisions,
   getStoredEvaluations,
+  getVerifiedMappingsByEndpointIds,
   invalidateDeviceMappings,
   listDebugLog,
   listDeviceCompliance,
@@ -30,6 +31,8 @@ import {
   recordListSyncSuccess,
   releaseRefreshLeases,
   releaseSyncLease,
+  markRediscoveryAttempted,
+  updateMappingEndpoint,
   saveAppSettings,
   saveDeviceObservations,
   saveDeviceMappings,
@@ -417,6 +420,9 @@ async function processRefreshMessage(
     const now = Date.now();
     await persistEvaluatedEndpoints(endpoints, env, maxContentAgeDays, now);
     await markMissingEndpoints(env.DB, missingIds, now);
+    if (missingIds.length > 0) {
+      await rediscoverMissingEndpoints(missingIds, env, maxContentAgeDays, now);
+    }
     if (message.leaseToken) {
       await releaseRefreshLeases(
         env.DB,
@@ -520,6 +526,87 @@ async function applyBootstrapSettings(env: Env): Promise<void> {
     console.error(
       JSON.stringify({
         event: "bootstrap_settings_error",
+        error: errorMessage(error),
+      }),
+    );
+  }
+}
+
+const REDISCOVERY_INTERVAL_MS = 60 * 60 * 1000;
+
+// Cortex re-registers machines with a new endpoint_id when the agent is
+// reinstalled (for example after a re-image). Such endpoints surface as
+// "missing" during refresh; this re-runs hostname discovery at most once per
+// hour per endpoint and re-points the stored mapping when the machine came
+// back with the same hostname. Decommissioned machines simply keep failing
+// open at a bounded hourly retry cost.
+async function rediscoverMissingEndpoints(
+  missingIds: string[],
+  env: RuntimeEnv,
+  maxContentAgeDays: number,
+  now: number,
+): Promise<void> {
+  try {
+    const mappings = await getVerifiedMappingsByEndpointIds(env.DB, missingIds);
+    const due = mappings.filter(
+      (mapping) =>
+        now - (mapping.rediscoveredAt ?? 0) >= REDISCOVERY_INTERVAL_MS,
+    );
+    if (due.length === 0) return;
+    const dueEndpoints = [
+      ...new Set(due.map((mapping) => mapping.cortexEndpointId)),
+    ];
+    await markRediscoveryAttempted(env.DB, dueEndpoints, now);
+
+    const hostnames = [
+      ...new Set(due.map((mapping) => mapping.hostname).filter(Boolean)),
+    ];
+    if (hostnames.length === 0) return;
+    const endpoints = await getEndpointsByHostnames(hostnames, env);
+
+    const found = new Map<string, CortexEndpoint>();
+    let repointed = 0;
+    for (const mapping of due) {
+      const device: CloudflareDevice = {
+        device_id: mapping.cloudflareDeviceId,
+        hostname: mapping.hostname,
+        ...(mapping.verifiedMac
+          ? { mac_address: mapping.verifiedMac }
+          : {}),
+      };
+      const match = findCortexEndpoint(device, endpoints);
+      if (!match) continue;
+      found.set(match.endpoint_id, match);
+      if (match.endpoint_id !== mapping.cortexEndpointId) {
+        await updateMappingEndpoint(
+          env.DB,
+          mapping.cloudflareDeviceId,
+          match.endpoint_id,
+          now,
+        );
+        repointed += 1;
+      }
+    }
+    if (found.size > 0) {
+      await persistEvaluatedEndpoints(
+        [...found.values()],
+        env,
+        maxContentAgeDays,
+        now,
+      );
+    }
+    console.log(
+      JSON.stringify({
+        event: "endpoint_rediscovery",
+        missing: due.length,
+        recovered: found.size,
+        repointed,
+      }),
+    );
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "endpoint_rediscovery_error",
         error: errorMessage(error),
       }),
     );

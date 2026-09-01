@@ -85,6 +85,26 @@ Cortex documents `last_content_update_time` as a response field, not a supported
 batches of 100, but only the much smaller noncompliant serial set is published
 to Cloudflare policy.
 
+### Endpoint identity over time
+
+`endpoint_id` is Cortex's stable key: hostnames are not unique, so refreshes
+are keyed by ID. Mappings stay correct as the fleet changes:
+
+- Every `/check` re-verifies each stored mapping against current inventory.
+  Hostname or serial-number changes invalidate the mapping, write a removal
+  tombstone for the old serial, and trigger re-discovery.
+- An endpoint that no longer exists in Cortex fails open: its snapshot is
+  cleared so the device stays allowed, and it is retried on later cycles.
+- Once per hour the Worker re-runs hostname discovery for mappings whose
+  endpoint disappeared. When the Cortex agent was reinstalled on the same
+  machine (new `endpoint_id`, same hostname — for example after a re-image),
+  the mapping is re-pointed to the current endpoint and the snapshot is
+  restored. Decommissioned machines simply keep failing open at a bounded
+  hourly retry cost.
+- Renamed machines are handled by the `/check` identity check: the new
+  hostname fails the stored-mapping comparison and re-discovery finds the
+  endpoint under its new name.
+
 ## Behavior
 
 For an expected 12,000-device fleet with 1–5% stale endpoints, the list normally

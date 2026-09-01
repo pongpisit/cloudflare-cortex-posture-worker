@@ -902,6 +902,87 @@ export async function getDeviceMappingsByDeviceIds(
   return result;
 }
 
+export interface VerifiedMappingInfo {
+  cloudflareDeviceId: string;
+  cortexEndpointId: string;
+  hostname: string;
+  verifiedMac: string | null;
+  rediscoveredAt: number | null;
+}
+
+interface VerifiedMappingRow {
+  cloudflare_device_id: string;
+  cortex_endpoint_id: string;
+  hostname: string;
+  verified_mac: string | null;
+  rediscovered_at: number | null;
+}
+
+export async function getVerifiedMappingsByEndpointIds(
+  db: D1Database,
+  endpointIds: string[],
+): Promise<VerifiedMappingInfo[]> {
+  const result: VerifiedMappingInfo[] = [];
+  for (const ids of chunk(endpointIds, 80)) {
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = await db
+      .prepare(
+        `SELECT cloudflare_device_id, cortex_endpoint_id, hostname,
+                verified_mac, rediscovered_at
+         FROM device_mappings
+         WHERE status = 'verified'
+           AND cortex_endpoint_id IN (${placeholders})`,
+      )
+      .bind(...ids)
+      .all<VerifiedMappingRow>();
+    result.push(
+      ...rows.results.map((row) => ({
+        cloudflareDeviceId: row.cloudflare_device_id,
+        cortexEndpointId: row.cortex_endpoint_id,
+        hostname: row.hostname,
+        verifiedMac: row.verified_mac,
+        rediscoveredAt: row.rediscovered_at,
+      })),
+    );
+  }
+  return result;
+}
+
+export async function updateMappingEndpoint(
+  db: D1Database,
+  deviceId: string,
+  endpointId: string,
+  now: number,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE device_mappings
+       SET cortex_endpoint_id = ?, updated_at = ?
+       WHERE cloudflare_device_id = ? AND status = 'verified'`,
+    )
+    .bind(endpointId, now, deviceId)
+    .run();
+}
+
+export async function markRediscoveryAttempted(
+  db: D1Database,
+  endpointIds: string[],
+  now: number,
+): Promise<void> {
+  for (const ids of chunk(endpointIds, 80)) {
+    const placeholders = ids.map(() => "?").join(",");
+    await db
+      .prepare(
+        `UPDATE device_mappings
+         SET rediscovered_at = ?
+         WHERE status = 'verified'
+           AND cortex_endpoint_id IN (${placeholders})`,
+      )
+      .bind(now, ...ids)
+      .run();
+  }
+}
+
 export async function getDeviceComplianceByDeviceId(
   db: D1Database,
   deviceId: string,

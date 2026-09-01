@@ -8,6 +8,7 @@ const MIGRATION_NAMES = [
   "0007_refresh_lease_tokens",
   "0008_app_settings",
   "0009_debug_log",
+  "0010_mapping_rediscovery",
 ] as const;
 
 // Idempotent equivalent of migrations 0001-0008, executed as one D1 batch
@@ -32,7 +33,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       last_verified_at INTEGER NOT NULL,
-      virtual_ipv4 TEXT
+      virtual_ipv4 TEXT,
+      rediscovered_at INTEGER
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS endpoint_snapshots (
       cortex_endpoint_id TEXT PRIMARY KEY,
@@ -126,4 +128,16 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       )
       .bind(Date.now()),
   ]);
+
+  // Additive columns for databases provisioned before they existed; CREATE
+  // TABLE IF NOT EXISTS cannot extend an existing table. The duplicate-column
+  // error is expected and ignored once the column is present.
+  try {
+    await db
+      .prepare(`ALTER TABLE device_mappings ADD COLUMN rediscovered_at INTEGER`)
+      .run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/duplicate column/i.test(message)) throw error;
+  }
 }

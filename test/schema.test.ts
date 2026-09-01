@@ -46,6 +46,11 @@ describe("schema bootstrap", () => {
         ),
       ).toBe(true);
     }
+    expect(
+      statements.some((sql) =>
+        sql.includes("ALTER TABLE device_mappings ADD COLUMN rediscovered_at"),
+      ),
+    ).toBe(true);
     for (const index of [
       "idx_device_mappings_endpoint",
       "idx_endpoint_snapshots_refresh",
@@ -69,7 +74,7 @@ describe("schema bootstrap", () => {
       statements.some((sql) => sql.startsWith("INSERT OR IGNORE INTO d1_migrations")),
     ).toBe(true);
     const migrationBind = bound.find(
-      (values) => values.length === 9 && values.every((v) => typeof v === "string"),
+      (values) => values.length === 10 && values.every((v) => typeof v === "string"),
     );
     expect(migrationBind).toEqual([
       "0001_initial",
@@ -81,6 +86,7 @@ describe("schema bootstrap", () => {
       "0007_refresh_lease_tokens",
       "0008_app_settings",
       "0009_debug_log",
+      "0010_mapping_rediscovery",
     ]);
     expect(
       statements.filter((sql) => sql.includes("INSERT OR IGNORE INTO integration_status"))
