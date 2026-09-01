@@ -48,6 +48,8 @@ const DASHBOARD_HTML = `<!doctype html>
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   .row-check { border: 1px solid #cbd6e0; background: #fff; padding: 2px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; color: #1c2733; }
   .row-check:disabled { opacity: .5; cursor: default; }
+  .row-delete { border: 1px solid #f5b7b1; background: #fff; padding: 2px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; color: #c0392b; margin-left: 4px; }
+  .row-delete:disabled { opacity: .5; cursor: default; }
   #search { flex: 1; min-width: 170px; max-width: 280px; padding: 7px 10px; border: 1px solid #cbd6e0; border-radius: 8px; font-size: 13px; background: #fff; color: #1c2733; }
   #refresh-status { min-height: 16px; max-width: 300px; text-align: right; }
   .row-select, #select-all { cursor: pointer; }
@@ -146,6 +148,7 @@ const DASHBOARD_HTML = `<!doctype html>
       <button type="button" data-status="compliant">Compliant</button>
     </div>
     <button type="button" id="check-selected" class="row-check" disabled>Check selected</button>
+    <button type="button" id="delete-selected" class="row-delete" disabled>Delete selected</button>
     <div class="toolbar-right">
       <div class="sub" id="count"></div>
       <span class="meta" id="refresh-status"></span>
@@ -270,6 +273,10 @@ const DASHBOARD_HTML = `<!doctype html>
     button.type = "button";
     button.setAttribute("data-device-id", row.cloudflareDeviceId);
     checkCell.appendChild(button);
+    var deleteButton = el("button", "row-delete", "Delete");
+    deleteButton.type = "button";
+    deleteButton.setAttribute("data-device-id", row.cloudflareDeviceId);
+    checkCell.appendChild(deleteButton);
     td(null, row.hostname || "");
     td("mono", row.serialNumber || "");
     td("mono", mac(row.verifiedMac));
@@ -617,6 +624,7 @@ const DASHBOARD_HTML = `<!doctype html>
   });
 
   document.getElementById("check-selected").addEventListener("click", checkSelected);
+  document.getElementById("delete-selected").addEventListener("click", deleteSelected);
   document.getElementById("select-all").addEventListener("change", function (event) {
     var on = event.target.checked;
     for (var i = 0; i < renderedIds.length; i++) {
@@ -641,11 +649,78 @@ const DASHBOARD_HTML = `<!doctype html>
   }
 
   function updateBulkButton() {
-    var button = document.getElementById("check-selected");
-    button.disabled = selectedIds.length === 0;
-    button.textContent = selectedIds.length
+    var check = document.getElementById("check-selected");
+    var del = document.getElementById("delete-selected");
+    check.disabled = selectedIds.length === 0;
+    del.disabled = selectedIds.length === 0;
+    check.textContent = selectedIds.length
       ? "Check selected (" + selectedIds.length + ")"
       : "Check selected";
+    del.textContent = selectedIds.length
+      ? "Delete selected (" + selectedIds.length + ")"
+      : "Delete selected";
+  }
+
+  function deleteDevice(deviceId, done) {
+    fetch("/api/devices/delete", {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ deviceId: deviceId })
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error("delete failed (" + r.status + ")");
+        return r.json();
+      })
+      .then(function () {
+        setRefreshStatus("Deleted \\u00b7 serial leaves the denylist on next sync");
+        refresh();
+      })
+      .catch(function (err) {
+        showError(String(err && err.message ? err.message : err));
+        if (done) done();
+      });
+  }
+
+  function deleteSelected() {
+    if (!selectedIds.length) return;
+    if (
+      !confirm(
+        "Delete " + selectedIds.length + " device(s)? Their serials will be removed from the denylist on the next sync."
+      )
+    ) {
+      return;
+    }
+    var button = document.getElementById("delete-selected");
+    button.disabled = true;
+    button.textContent = "Deleting\\u2026";
+    fetch("/api/devices/delete", {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ deviceIds: selectedIds })
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error("delete failed (" + r.status + ")");
+        return r.json();
+      })
+      .then(function (payload) {
+        var message = "Deleted " + payload.deleted + " device(s)";
+        if (payload.notFound && payload.notFound.length) {
+          message += " \\u00b7 " + payload.notFound.length + " not found";
+        }
+        setRefreshStatus(message);
+        selectedIds = [];
+        refresh();
+      })
+      .catch(function (err) {
+        setRefreshStatus("Error: " + String(err && err.message ? err.message : err));
+      })
+      .then(updateBulkButton);
   }
 
   var refreshStatusTimer = null;
@@ -743,8 +818,26 @@ const DASHBOARD_HTML = `<!doctype html>
 
   document.getElementById("rows").addEventListener("click", function (event) {
     var button = event.target;
-    if (button.tagName !== "BUTTON" || !button.classList.contains("row-check")) return;
+    if (button.tagName !== "BUTTON") return;
     var deviceId = button.getAttribute("data-device-id");
+
+    if (button.classList.contains("row-delete")) {
+      if (
+        !confirm(
+          "Delete this device? Its serial will be removed from the denylist on the next sync."
+        )
+      ) {
+        return;
+      }
+      button.disabled = true;
+      deleteDevice(deviceId, function () {
+        button.disabled = false;
+        button.textContent = "Delete";
+      });
+      return;
+    }
+
+    if (!button.classList.contains("row-check")) return;
     button.disabled = true;
     button.textContent = "\\u2026";
     fetch("/api/devices/refresh", {

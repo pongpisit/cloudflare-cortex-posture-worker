@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  deleteDevices,
   getAppSettings,
   getDashboardIntegrations,
   getDeviceCounts,
@@ -14,7 +15,11 @@ function fakeDb<T>(rows: T[]): D1Database {
     first: async () => rows[0] ?? null,
     run: async () => ({}),
   };
-  return { prepare: () => statement } as unknown as D1Database;
+  const db = {
+    prepare: () => statement,
+    batch: async (statements: unknown[]) => statements.map(() => ({})),
+  };
+  return db as unknown as D1Database;
 }
 
 describe("dashboard repository", () => {
@@ -122,6 +127,16 @@ describe("dashboard repository", () => {
         durationMs: 412,
       },
     ]);
+  });
+
+  it("returns the ids of deleted devices", async () => {
+    const db = fakeDb([
+      { cloudflare_device_id: "device-a", cortex_endpoint_id: "ep-1" },
+      { cloudflare_device_id: "device-b", cortex_endpoint_id: "ep-2" },
+    ]);
+    await expect(
+      deleteDevices(db, ["device-a", "device-b", "device-c"], 1000),
+    ).resolves.toEqual(["device-a", "device-b"]);
   });
 
   it("marks stale content noncompliant and fresh or missing content compliant", async () => {

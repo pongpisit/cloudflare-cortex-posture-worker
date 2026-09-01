@@ -12,6 +12,7 @@ import {
   claimDueEndpointIds,
   claimSyncLease,
   clearDebugLog,
+  deleteDevices,
   getAppSettings,
   bootstrapAppSettings,
   getDashboardIntegrations,
@@ -98,6 +99,11 @@ export default {
       if (url.pathname === "/api/devices/refresh") {
         if (request.method !== "POST") return methodNotAllowed("POST");
         return await postApiDeviceRefresh(request, env);
+      }
+
+      if (url.pathname === "/api/devices/delete") {
+        if (request.method !== "POST") return methodNotAllowed("POST");
+        return await postApiDeviceDelete(request, env);
       }
 
       if (url.pathname === "/api/sync") {
@@ -904,6 +910,45 @@ async function postApiDeviceRefresh(
     if (device) devices.push(device);
   }
   return json({ devices, notFound, endpointNotFound });
+}
+
+async function postApiDeviceDelete(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const body = await readRequestJson(request, 16 * 1024);
+  if (!isRecord(body)) throw new ClientError(400, "device_id_required");
+  let deviceIds: string[];
+  if (typeof body.deviceId === "string" && body.deviceId.trim()) {
+    deviceIds = [body.deviceId.trim()];
+  } else if (Array.isArray(body.deviceIds)) {
+    deviceIds = [
+      ...new Set(
+        body.deviceIds
+          .filter(
+            (value): value is string =>
+              typeof value === "string" && value.trim().length > 0,
+          )
+          .map((value) => value.trim()),
+      ),
+    ];
+    if (deviceIds.length === 0) {
+      throw new ClientError(400, "device_ids_required");
+    }
+    if (deviceIds.length > 100) {
+      throw new ClientError(400, "maximum_100_devices");
+    }
+  } else {
+    throw new ClientError(400, "device_id_required");
+  }
+
+  const deleted = await deleteDevices(env.DB, deviceIds, Date.now());
+  const deletedSet = new Set(deleted);
+  const notFound = deviceIds.filter((id) => !deletedSet.has(id));
+  if (deviceIds.length === 1 && notFound.length === 1) {
+    throw new ClientError(404, "device_not_found");
+  }
+  return json({ deleted: deleted.length, notFound });
 }
 
 async function postApiSync(env: Env): Promise<Response> {

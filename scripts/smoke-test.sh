@@ -50,6 +50,8 @@ expect "api devices (search)" 200 \
 expect "api debug log" 200 "$(status "${BASE_URL}/api/debug-log" "${auth[@]}")"
 expect "refresh unknown device rejected" 404 \
   "$(status -X POST -H 'content-type: application/json' -d '{"deviceId":"does-not-exist"}' "${BASE_URL}/api/devices/refresh" "${auth[@]}")"
+expect "delete unknown device rejected" 404 \
+  "$(status -X POST -H 'content-type: application/json' -d '{"deviceId":"does-not-exist"}' "${BASE_URL}/api/devices/delete" "${auth[@]}")"
 expect "check (empty inventory)" 200 \
   "$(status -X POST -H 'content-type: application/json' -d '{"devices":[]}' "${BASE_URL}/check" "${auth[@]}")"
 expect "rejects invalid device filter" 400 \

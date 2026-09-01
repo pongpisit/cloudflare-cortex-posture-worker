@@ -442,8 +442,14 @@ applied on the next Cron run without a redeploy:
 Each device row has a **Check** button that refreshes that single device from
 Cortex on demand and updates the row with the result. Rows also have
 checkboxes (with select-all) — **Check selected** refreshes up to 100 devices
-in a single Cortex request. The **search bar** filters devices by hostname,
-serial, or MAC address.
+in a single Cortex request, and **Delete selected** removes devices from
+tracking. The **search bar** filters devices by hostname, serial, or MAC
+address.
+
+Deleting a device removes its mapping and observations, tombstones its serial
+so the next synchronization removes it from the denylist, and deletes the
+endpoint snapshot when no other mapping references it. Devices that are still
+enrolled and reported by the provider are re-discovered on a later poll.
 
 The **Debug log** button opens a chat-style popup that streams the most recent
 Cortex requests and responses live — requests appear as outgoing bubbles,
@@ -458,6 +464,7 @@ JSON backing endpoints:
 | `GET /api/overview` | Integration statuses, device counts, noncompliant serial count, sync state |
 | `GET /api/devices?status=all\|noncompliant\|compliant&search=<text>&limit=N` | Per-device compliance rows with optional search, `limit` 1–500, default 200 |
 | `POST /api/devices/refresh` | Refresh devices from Cortex immediately: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100 |
+| `POST /api/devices/delete` | Delete devices from tracking: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100 |
 | `POST /api/sync` | Run the list synchronization immediately |
 | `GET /api/debug-log?limit=N` | Recent Cortex request/response pairs, `limit` 1–200, default 50 |
 | `DELETE /api/debug-log` | Clear the debug log |

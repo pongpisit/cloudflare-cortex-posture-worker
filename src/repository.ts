@@ -902,6 +902,69 @@ export async function getDeviceMappingsByDeviceIds(
   return result;
 }
 
+// Hard-deletes device mappings. Each serial is tombstoned first so the next
+// synchronization removes it from the denylist, and endpoint snapshots are
+// removed only when no other mapping still references the endpoint.
+export async function deleteDevices(
+  db: D1Database,
+  deviceIds: string[],
+  now: number,
+): Promise<string[]> {
+  const deleted: string[] = [];
+  const endpoints = new Set<string>();
+  const tombstones = [];
+  for (const ids of chunk(deviceIds, 80)) {
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = await db
+      .prepare(
+        `SELECT cloudflare_device_id, cortex_endpoint_id FROM device_mappings
+         WHERE cloudflare_device_id IN (${placeholders})`,
+      )
+      .bind(...ids)
+      .all<DeviceMappingRow>();
+    for (const row of rows.results) {
+      deleted.push(row.cloudflare_device_id);
+      endpoints.add(row.cortex_endpoint_id);
+      tombstones.push(
+        db
+          .prepare(
+            `INSERT INTO serial_removals(serial_number, observed_at)
+             SELECT TRIM(serial_number), ? FROM device_mappings
+             WHERE cloudflare_device_id = ?
+               AND serial_number IS NOT NULL AND TRIM(serial_number) != ''
+             ON CONFLICT(serial_number) DO UPDATE SET
+               observed_at = MAX(serial_removals.observed_at, excluded.observed_at)`,
+          )
+          .bind(now, row.cloudflare_device_id),
+      );
+    }
+  }
+
+  const removals = deleted.flatMap((deviceId) => [
+    db
+      .prepare(`DELETE FROM device_mappings WHERE cloudflare_device_id = ?`)
+      .bind(deviceId),
+    db
+      .prepare(`DELETE FROM device_observations WHERE cloudflare_device_id = ?`)
+      .bind(deviceId),
+  ]);
+  const snapshotCleanup = [...endpoints].map((endpointId) =>
+    db
+      .prepare(
+        `DELETE FROM endpoint_snapshots
+         WHERE cortex_endpoint_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM device_mappings WHERE cortex_endpoint_id = ?
+           )`,
+      )
+      .bind(endpointId, endpointId),
+  );
+
+  const statements = [...tombstones, ...removals, ...snapshotCleanup];
+  for (const batch of chunk(statements, 100)) await db.batch(batch);
+  return deleted;
+}
+
 export interface VerifiedMappingInfo {
   cloudflareDeviceId: string;
   cortexEndpointId: string;
