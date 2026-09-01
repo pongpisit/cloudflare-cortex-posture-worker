@@ -14,6 +14,9 @@ const DASHBOARD_HTML = `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cortex Posture Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
 <style>
   :root {
     color-scheme: light;
@@ -33,7 +36,7 @@ const DASHBOARD_HTML = `<!doctype html>
   }
   * { box-sizing: border-box; }
   ::selection { background: rgba(246, 130, 31, .28); }
-  body { margin: 0; font-family: "Cloudflare Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: var(--cf-bg); color: var(--cf-ink); }
+  body { margin: 0; font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: var(--cf-bg); color: var(--cf-ink); font-feature-settings: "cv11", "ss01"; }
   .topbar { background: var(--cf-navy); color: #fff; }
   .topbar-inner { max-width: 1180px; margin: 0 auto; min-height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; flex-wrap: wrap; }
   .brand { display: flex; gap: 12px; align-items: center; padding: 10px 0; }
@@ -70,7 +73,7 @@ const DASHBOARD_HTML = `<!doctype html>
   .chip.ok { background: #e3f4ed; color: #0b7d57; }
   .chip.neutral { background: #eef0f3; color: var(--cf-secondary); }
   .error { background: #fce9e9; border: 1px solid #f1b8b8; color: #9c2f33; border-radius: 6px; padding: 10px 14px; margin-bottom: 16px; display: none; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .mono { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   .row-check { border: 1px solid #cfd4da; background: #fff; padding: 2px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; color: var(--cf-ink); }
   .row-check:hover { border-color: var(--cf-orange-deep); }
   .row-check:disabled { opacity: .5; cursor: default; }
@@ -109,7 +112,7 @@ const DASHBOARD_HTML = `<!doctype html>
   .chat-bubble-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .chat-row.request .chat-bubble-head { color: #fff; }
   .chat-meta { opacity: .75; font-size: 11px; }
-  .chat-bubble pre { background: #f6f7f8; color: var(--cf-ink); border-radius: 8px; padding: 8px 10px; overflow: auto; max-height: 220px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; font-size: 11px; }
+  .chat-bubble pre { background: #f6f7f8; color: var(--cf-ink); border-radius: 8px; padding: 8px 10px; overflow: auto; max-height: 220px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; font-size: 11px; font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
   .chat-row.request .chat-bubble pre { background: rgba(255,255,255,.12); color: #e8edf3; }
   .debug-empty { color: var(--cf-secondary); font-size: 12px; text-align: center; padding: 14px 0; }
   .config { background: #fff; border: 1px solid var(--cf-border); border-radius: 8px; padding: 16px; margin-bottom: 20px; box-shadow: 0 1px 2px rgba(29, 31, 32, .04); }
