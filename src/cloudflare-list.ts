@@ -32,7 +32,7 @@ interface ApiEnvelope<T> {
 export interface SerialListEnv {
   DB: D1Database;
   CLOUDFLARE_API_TOKEN?: string;
-  SNAPSHOT_REFRESH_MINUTES?: string;
+  RECOVERY_REFRESH_MINUTES?: string;
 }
 
 export interface SerialListSyncConfig {
@@ -73,8 +73,11 @@ export async function reconcileNoncompliantSerialList(
 ): Promise<SerialListSyncResult> {
   requireConfiguration(env, config);
   const maximumAge = config.maxContentAgeDays * 86_400_000;
-  const refreshMinutes = positiveNumber(env.SNAPSHOT_REFRESH_MINUTES, 5);
-  const refreshedAfter = now - refreshMinutes * 2 * 60_000;
+  // Decision freshness keys off the recovery tier: denylist members are
+  // refreshed at that cadence, so their add/remove decisions are always
+  // produced, while fleet-wide sweeps are only needed for detection.
+  const recoveryMinutes = positiveNumber(env.RECOVERY_REFRESH_MINUTES, 30);
+  const refreshedAfter = now - recoveryMinutes * 2 * 60_000;
   let decisions = await getSerialComplianceDecisions(
     env.DB,
     maximumAge,

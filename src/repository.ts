@@ -144,9 +144,17 @@ export async function saveDeviceObservations(
   for (const batch of chunk(statements, 100)) await db.batch(batch);
 }
 
+// Two refresh tiers. Endpoints whose last-known content is stale (current
+// denylist members) are due at the recovery cutoff so recovered devices are
+// unblocked quickly. Everything else is only due at the detection cutoff:
+// detecting a device that crossed the content-age threshold does not require
+// minute-level latency, which keeps write volume proportional to the
+// noncompliant population instead of the fleet.
 export async function claimDueEndpointIds(
   db: D1Database,
-  cutoff: number,
+  maximumContentAge: number,
+  recoveryCutoff: number,
+  detectionCutoff: number,
   afterId: string,
   limit: number,
 ): Promise<{
@@ -166,12 +174,27 @@ export async function claimDueEndpointIds(
          ON l.cortex_endpoint_id = m.cortex_endpoint_id
        WHERE m.status = 'verified'
          AND m.cortex_endpoint_id > ?
-         AND (s.cortex_refreshed_at IS NULL OR s.cortex_refreshed_at <= ?)
+         AND (
+           s.cortex_refreshed_at IS NULL
+           OR s.cortex_refreshed_at <= ?
+           OR (
+             s.last_content_update_time > 0
+             AND s.last_content_update_time < s.cortex_refreshed_at - ?
+             AND s.cortex_refreshed_at <= ?
+           )
+         )
          AND (l.leased_until IS NULL OR l.leased_until <= ?)
        ORDER BY m.cortex_endpoint_id
        LIMIT ?`,
     )
-    .bind(afterId, cutoff, claimedAt, limit)
+    .bind(
+      afterId,
+      detectionCutoff,
+      maximumContentAge,
+      recoveryCutoff,
+      claimedAt,
+      limit,
+    )
     .all<EndpointIdRow>();
   const endpointIds = result.results.map((row) => row.cortex_endpoint_id);
   const leasedUntil = claimedAt + 15 * 60_000;

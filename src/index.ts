@@ -160,7 +160,7 @@ export default {
         serialNumber: string | null;
       }> = [];
       let staleCount = 0;
-      const staleAfter = snapshotRefreshMinutes(env) * 2 * 60_000;
+      const staleAfter = detectionRefreshMinutes(env) * 2 * 60_000;
 
       for (const device of devices) {
         const stored = evaluations.get(device.device_id);
@@ -369,8 +369,15 @@ export default {
       }
     }
 
-    const refreshMinutes = snapshotRefreshMinutes(env);
-    const cutoff = Date.now() - refreshMinutes * 60_000;
+    // Two refresh tiers: endpoints with stale content (current denylist
+    // members) are re-checked at the recovery interval so recovered devices
+    // are unblocked quickly; everything else is only swept at the detection
+    // interval, because a device crossing the content-age threshold is
+    // detected just as well hours later.
+    const recoveryMinutes = recoveryRefreshMinutes(env);
+    const detectionMinutes = detectionRefreshMinutes(env);
+    const maximumContentAgeDays = settings?.maxContentAgeDays ?? 7;
+    const now = Date.now();
     let afterId = "";
     let queued = 0;
 
@@ -378,7 +385,9 @@ export default {
       while (true) {
         const claim = await claimDueEndpointIds(
           env.DB,
-          cutoff,
+          maximumContentAgeDays * 86_400_000,
+          now - recoveryMinutes * 60_000,
+          now - detectionMinutes * 60_000,
           afterId,
           1000,
         );
@@ -733,7 +742,7 @@ async function getApiOverview(env: Env): Promise<Response> {
   const now = Date.now();
   const settings = await getAppSettings(env.DB);
   const maximumAgeDays = settings.maxContentAgeDays;
-  const refreshMinutes = snapshotRefreshMinutes(env);
+  const refreshMinutes = recoveryRefreshMinutes(env);
   const [integrations, devices, decisions] = await Promise.all([
     getDashboardIntegrations(env.DB),
     getDeviceCounts(env.DB),
@@ -1235,11 +1244,19 @@ function positiveNumber(value: string | undefined, fallback: number): number {
   return Number.isFinite(number) && number > 0 ? number : fallback;
 }
 
-function snapshotRefreshMinutes(env: Env): number {
+function recoveryRefreshMinutes(env: Env): number {
   return positiveNumber(
-    (env as Env & { SNAPSHOT_REFRESH_MINUTES?: string })
-      .SNAPSHOT_REFRESH_MINUTES,
-    5,
+    (env as Env & { RECOVERY_REFRESH_MINUTES?: string })
+      .RECOVERY_REFRESH_MINUTES,
+    30,
+  );
+}
+
+function detectionRefreshMinutes(env: Env): number {
+  return positiveNumber(
+    (env as Env & { DETECTION_REFRESH_MINUTES?: string })
+      .DETECTION_REFRESH_MINUTES,
+    240,
   );
 }
 

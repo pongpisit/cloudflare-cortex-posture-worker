@@ -380,11 +380,14 @@ list; the explicit `noncompliant` name avoids reversing the rule accidentally.
 10. Expand enforcement after reviewing Access, Gateway, posture, and Worker
     logs.
 
-The current Cron interval is five minutes. Because list synchronization occurs
-before the next Cortex refresh fan-out, a change may require one refresh cycle,
-the following list-sync cycle, and Gateway's posture cache. Plan for roughly
-10–15 minutes worst-case propagation. Existing Gateway sessions are not
-necessarily terminated when posture changes.
+The current Cron interval is five minutes. Removal of a recovered device
+requires one recovery refresh (30 minutes at defaults), the following
+list-sync cycle, and Gateway's posture cache — plan for roughly one hour.
+Detecting a newly stale device additionally requires the detection sweep, so
+plan for up to the detection interval (4 hours at defaults) plus the above;
+both are negligible against the 7-day staleness threshold, and both intervals
+are tunable. Existing Gateway sessions are not necessarily terminated when
+posture changes.
 
 ## Operations
 
@@ -417,7 +420,17 @@ timestamps. Relevant structured events include:
 The Worker refuses to update when the desired count exceeds the configured list
 capacity and warns at 80% capacity.
 
-D1 write volume stays proportional to fleet churn rather than fleet size:
+Cortex refreshes use two tiers. Endpoints whose last-known content is stale —
+the current denylist members — are re-checked at the recovery interval
+(`RECOVERY_REFRESH_MINUTES`, default 30) so recovered devices are unblocked
+promptly. Everything else is swept only at the detection interval
+(`DETECTION_REFRESH_MINUTES`, default 240), because detecting a device that
+crossed the content-age threshold is just as correct hours later. This keeps
+D1 write volume proportional to the noncompliant population rather than the
+fleet: at 12,000 devices with 1–5% stale, roughly 9 million writes per month,
+which fits comfortably inside the paid plan's included 50 million.
+
+D1 write volume also stays proportional to fleet churn rather than fleet size:
 each provider poll only writes observation rows for devices that need action
 (discovery, serial updates, invalidation) instead of the full inventory, and
 the debug log is pruned to the most recent 200 entries.
@@ -583,8 +596,8 @@ Dashboard-managed settings (stored in D1, with defaults):
 | Cortex traffic logging | enabled | Store recent Cortex request/response pairs for the debug panel |
 
 Advanced overrides (set as Worker dashboard variables only when needed):
-`SNAPSHOT_REFRESH_MINUTES` (`5`), `CORTEX_TIMEOUT_MS` (`15000`),
-`CORTEX_KEY_TYPE` (`advanced`).
+`RECOVERY_REFRESH_MINUTES` (`30`), `DETECTION_REFRESH_MINUTES` (`240`),
+`CORTEX_TIMEOUT_MS` (`15000`), `CORTEX_KEY_TYPE` (`advanced`).
 
 Official documentation:
 
