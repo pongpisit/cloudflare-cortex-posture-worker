@@ -143,12 +143,6 @@ export default {
       const devices = parseDevices(body);
       const observationId = crypto.randomUUID();
       const observedAt = Date.now();
-      await saveDeviceObservations(
-        env.DB,
-        devices.map((device) => device.device_id),
-        observationId,
-        observedAt,
-      );
       const evaluations = await getStoredEvaluations(
         env.DB,
         devices.map((device) => device.device_id),
@@ -222,6 +216,23 @@ export default {
           score: stored.score,
         };
       }
+
+      // Observation rows exist to guard concurrent polls against stale
+      // mapping writes, so they are only needed for devices that this poll
+      // acts on. Keeping stable devices out of the write path keeps D1 write
+      // volume proportional to fleet churn instead of fleet size.
+      await saveDeviceObservations(
+        env.DB,
+        [
+          ...new Set([
+            ...discoveries.map((device) => device.device_id),
+            ...invalidDeviceIds,
+            ...serialUpdates.map((update) => update.deviceId),
+          ]),
+        ],
+        observationId,
+        observedAt,
+      );
 
       await Promise.all([
         invalidateDeviceMappings(env.DB, invalidDeviceIds, observationId),

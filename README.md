@@ -417,6 +417,11 @@ timestamps. Relevant structured events include:
 The Worker refuses to update when the desired count exceeds the configured list
 capacity and warns at 80% capacity.
 
+D1 write volume stays proportional to fleet churn rather than fleet size:
+each provider poll only writes observation rows for devices that need action
+(discovery, serial updates, invalidation) instead of the full inventory, and
+the debug log is pruned to the most recent 200 entries.
+
 ## Dashboard
 
 `GET /dashboard` serves an operations page behind the same Access application

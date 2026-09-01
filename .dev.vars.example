@@ -1,3 +1,5 @@
 CORTEX_API_KEY=replace-with-local-api-key
 CORTEX_API_KEY_ID=replace-with-local-key-id
 CLOUDFLARE_API_TOKEN=replace-with-local-zero-trust-write-token
+CF_ACCESS_CLIENT_ID=replace-with-access-service-token-client-id
+CF_ACCESS_CLIENT_SECRET=replace-with-access-service-token-client-secret
