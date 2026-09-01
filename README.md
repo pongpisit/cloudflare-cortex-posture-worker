@@ -126,6 +126,17 @@ The list is replaced as one complete set instead of applying concurrent
 add/remove operations. Before writing, the Worker validates the list ID, name,
 type, and configured capacity. It verifies the returned items after writing.
 
+### Cold start
+
+There is no bulk import of Cortex endpoint IDs. The Worker learns them
+organically: devices appear in `/check` inventory, are matched to Cortex
+endpoints by hostname (MAC tiebreak for duplicates), and receive a snapshot in
+the same discovery pass. A device that appears in a poll is therefore
+denylist-eligible within one Cron cycle (about five minutes). At 10-minute
+provider polling, a 12,000-device fleet is fully learned within the first one
+or two polls. Endpoints that never enroll in Cloudflare are never learned —
+correct, because the denylist only affects devices Cloudflare can evaluate.
+
 ## Prerequisites
 
 - Cloudflare Workers, D1, Queues, Access, Gateway, and Cloudflare One Client.
