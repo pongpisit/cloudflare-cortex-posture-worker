@@ -515,53 +515,75 @@ const DASHBOARD_HTML = `<!doctype html>
     return String(url || "").replace(/^https?:\\/\\/[^\\/]+/, "");
   }
 
+  var DEBUG_DOM_CAP = 250;
+
+  function appendDebugBubble(body, entry, fresh) {
+    var isRequest = entry.direction === "request";
+    var row = el("div", "chat-row " + (isRequest ? "request" : "response"));
+    if (fresh) row.className += " fresh";
+    var bubble = el("div", "chat-bubble");
+    var head = el("div", "chat-bubble-head");
+    head.appendChild(
+      el(
+        "span",
+        "chip " + (isRequest ? "neutral" : entry.status && entry.status < 400 ? "ok" : "bad"),
+        isRequest ? "REQ" : "RES"
+      )
+    );
+    var detail =
+      (entry.method || "POST") + " " + shortUrl(entry.url) +
+      (entry.status ? " \\u00b7 " + entry.status : "") +
+      (entry.durationMs !== null && entry.durationMs !== undefined
+        ? " \\u00b7 " + entry.durationMs + " ms"
+        : "");
+    head.appendChild(el("span", "mono", detail));
+    head.appendChild(
+      el("span", "chat-meta", new Date(entry.createdAt).toLocaleTimeString())
+    );
+    bubble.appendChild(head);
+    if (entry.headers) bubble.appendChild(el("pre", "mono", entry.headers));
+    bubble.appendChild(el("pre", "mono", prettyJson(entry.body)));
+    row.appendChild(bubble);
+    body.appendChild(row);
+    while (body.children.length > DEBUG_DOM_CAP) {
+      body.removeChild(body.firstChild);
+    }
+  }
+
   function renderDebug(entries) {
     var body = document.getElementById("debug-entries");
-    var maxId = lastMaxDebugId;
-    var maxSeen = maxId || 0;
-    for (var i = 0; i < entries.length; i++) {
-      if (entries[i].id > maxSeen) maxSeen = entries[i].id;
-    }
-    body.textContent = "";
-    if (!entries.length) {
-      var empty = el("div", "debug-empty", "No traffic yet. Use a Check button or wait for the next Cron refresh.");
-      body.appendChild(empty);
-      lastMaxDebugId = maxSeen;
+    if (lastMaxDebugId === null) {
+      // First load (or after Clear): render the recent transcript in full.
+      body.textContent = "";
+      if (!entries.length) {
+        body.appendChild(
+          el("div", "debug-empty", "No traffic yet. Use a Check button or wait for the next Cron refresh.")
+        );
+        lastMaxDebugId = 0;
+        return;
+      }
+      var history = entries.slice().reverse();
+      for (var i = 0; i < history.length; i++) {
+        appendDebugBubble(body, history[i], false);
+      }
+      lastMaxDebugId = entries[0].id;
+      pinnedToBottom = true;
+      body.scrollTop = body.scrollHeight;
       return;
     }
-    var ascending = entries.slice().reverse();
-    ascending.forEach(function (entry) {
-      var isRequest = entry.direction === "request";
-      var row = el("div", "chat-row " + (isRequest ? "request" : "response"));
-      if (lastMaxDebugId !== null && entry.id > lastMaxDebugId) {
-        row.className += " fresh";
-      }
-      var bubble = el("div", "chat-bubble");
-      var head = el("div", "chat-bubble-head");
-      head.appendChild(
-        el(
-          "span",
-          "chip " + (isRequest ? "neutral" : entry.status && entry.status < 400 ? "ok" : "bad"),
-          isRequest ? "REQ" : "RES"
-        )
-      );
-      var detail =
-        (entry.method || "POST") + " " + shortUrl(entry.url) +
-        (entry.status ? " \\u00b7 " + entry.status : "") +
-        (entry.durationMs !== null && entry.durationMs !== undefined
-          ? " \\u00b7 " + entry.durationMs + " ms"
-          : "");
-      head.appendChild(el("span", "mono", detail));
-      head.appendChild(
-        el("span", "chat-meta", new Date(entry.createdAt).toLocaleTimeString())
-      );
-      bubble.appendChild(head);
-      if (entry.headers) bubble.appendChild(el("pre", "mono", entry.headers));
-      bubble.appendChild(el("pre", "mono", prettyJson(entry.body)));
-      row.appendChild(bubble);
-      body.appendChild(row);
+
+    // Streaming: append only entries newer than what is already rendered, so
+    // the scroll position of someone reading older traffic is never reset.
+    var freshEntries = entries.filter(function (entry) {
+      return entry.id > lastMaxDebugId;
     });
-    lastMaxDebugId = maxSeen;
+    if (!freshEntries.length) return;
+    var empty = body.querySelector(".debug-empty");
+    if (empty) empty.remove();
+    for (var j = freshEntries.length - 1; j >= 0; j--) {
+      appendDebugBubble(body, freshEntries[j], true);
+    }
+    lastMaxDebugId = entries[0].id;
     if (pinnedToBottom) body.scrollTop = body.scrollHeight;
   }
 
