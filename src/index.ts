@@ -438,6 +438,7 @@ export default {
   },
 
   async queue(batch, env): Promise<void> {
+    await ensureSchema(env.DB);
     for (const message of batch.messages) {
       if (!isRefreshMessage(message.body)) {
         // A malformed message can never succeed on retry; drop it instead of
