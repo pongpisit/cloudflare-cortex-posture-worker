@@ -40,6 +40,7 @@ echo "Worker: ${BASE_URL}"
 expect "health" 200 "$(status "${BASE_URL}/health" "${auth[@]}")"
 expect "dashboard page" 200 "$(status "${BASE_URL}/dashboard" "${auth[@]}")"
 expect "api overview" 200 "$(status "${BASE_URL}/api/overview" "${auth[@]}")"
+expect "api settings" 200 "$(status "${BASE_URL}/api/settings" "${auth[@]}")"
 expect "api devices (all)" 200 \
   "$(status "${BASE_URL}/api/devices?status=all&limit=10" "${auth[@]}")"
 expect "api devices (noncompliant)" 200 \

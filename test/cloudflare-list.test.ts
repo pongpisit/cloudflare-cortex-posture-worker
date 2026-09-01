@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { syncSerialList } from "../src/cloudflare-list";
 
-const env = {
-  CLOUDFLARE_ACCOUNT_ID: "account-1",
-  CLOUDFLARE_SERIAL_LIST_ID: "list-1",
-  CLOUDFLARE_SERIAL_LIST_NAME: "Cortex noncompliant devices",
-  CLOUDFLARE_LIST_MAX_ITEMS: "1000",
-  CLOUDFLARE_API_TOKEN: "secret-token",
+const env = { CLOUDFLARE_API_TOKEN: "secret-token" };
+
+const config = {
+  cloudflareAccountId: "account-1",
+  serialListId: "list-1",
+  maxContentAgeDays: 7,
+  listMaxItems: 1000,
 };
 
 function reply(
@@ -69,6 +70,7 @@ describe("Cloudflare serial denylist", () => {
       syncSerialList(
         [decision(" SERIAL-2 "), decision("SERIAL-1")],
         env,
+        config,
       ),
     ).resolves.toEqual({ changed: false, count: 2 });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -90,6 +92,7 @@ describe("Cloudflare serial denylist", () => {
           decision("SERIAL-1"),
         ],
         env,
+        config,
       ),
     ).resolves.toEqual({ changed: true, count: 2 });
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -124,7 +127,7 @@ describe("Cloudflare serial denylist", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(
-      syncSerialList([decision("OLD-SERIAL", false)], env),
+      syncSerialList([decision("OLD-SERIAL", false)], env, config),
     ).resolves.toEqual({
       changed: true,
       count: 0,
@@ -135,7 +138,7 @@ describe("Cloudflare serial denylist", () => {
     const fetchMock = vi.fn().mockResolvedValue(reply(["SERIAL-1"]));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(syncSerialList([], env)).resolves.toEqual({
+    await expect(syncSerialList([], env, config)).resolves.toEqual({
       changed: false,
       count: 1,
     });
@@ -149,7 +152,7 @@ describe("Cloudflare serial denylist", () => {
       .mockResolvedValueOnce(itemsReply(["SERIAL-1"]));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(syncSerialList([], env)).resolves.toEqual({
+    await expect(syncSerialList([], env, config)).resolves.toEqual({
       changed: false,
       count: 1,
     });
@@ -172,6 +175,7 @@ describe("Cloudflare serial denylist", () => {
       syncSerialList(
         [{ serialNumber: "SERIAL-1", noncompliant: true, description }],
         env,
+        config,
       ),
     ).resolves.toEqual({ changed: true, count: 1 });
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -187,10 +191,11 @@ describe("Cloudflare serial denylist", () => {
   it("refuses to publish more than the configured capacity", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(reply([])));
     await expect(
-      syncSerialList([decision("A"), decision("B")], {
-        ...env,
-        CLOUDFLARE_LIST_MAX_ITEMS: "1",
-      }),
+      syncSerialList(
+        [decision("A"), decision("B")],
+        env,
+        { ...config, listMaxItems: 1 },
+      ),
     ).rejects.toThrow("exceeds configured list limit");
     expect(fetch).toHaveBeenCalledTimes(1);
   });
@@ -210,8 +215,8 @@ describe("Cloudflare serial denylist", () => {
         }),
       ),
     );
-    await expect(syncSerialList([decision("SERIAL-1")], env)).rejects.toThrow(
-      "must have type SERIAL",
-    );
+    await expect(
+      syncSerialList([decision("SERIAL-1")], env, config),
+    ).rejects.toThrow("must have type SERIAL");
   });
 });

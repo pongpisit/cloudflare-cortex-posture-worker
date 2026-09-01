@@ -566,6 +566,82 @@ export async function clearSerialRemovals(
   }
 }
 
+export interface AppSettings {
+  cloudflareAccountId: string | null;
+  serialListId: string | null;
+  serialListName: string | null;
+  listSyncEnabled: boolean;
+  maxContentAgeDays: number;
+  listMaxItems: number;
+}
+
+interface AppSettingRow {
+  name: string;
+  value: string;
+}
+
+const APP_SETTING_KEYS = [
+  "cloudflare_account_id",
+  "serial_list_id",
+  "serial_list_name",
+  "list_sync_enabled",
+  "max_content_age_days",
+  "list_max_items",
+] as const;
+
+export async function getAppSettings(db: D1Database): Promise<AppSettings> {
+  const placeholders = APP_SETTING_KEYS.map(() => "?").join(",");
+  const result = await db
+    .prepare(
+      `SELECT name, value FROM app_settings WHERE name IN (${placeholders})`,
+    )
+    .bind(...APP_SETTING_KEYS)
+    .all<AppSettingRow>();
+  const values = new Map(result.results.map((row) => [row.name, row.value]));
+  return {
+    cloudflareAccountId: values.get("cloudflare_account_id") || null,
+    serialListId: values.get("serial_list_id") || null,
+    serialListName: values.get("serial_list_name") || null,
+    listSyncEnabled: values.get("list_sync_enabled") === "true",
+    maxContentAgeDays: settingInt(
+      values.get("max_content_age_days"),
+      1,
+      365,
+      7,
+    ),
+    listMaxItems: settingInt(values.get("list_max_items"), 1, 100_000, 1000),
+  };
+}
+
+export async function saveAppSettings(
+  db: D1Database,
+  updates: Record<string, string>,
+  now = Date.now(),
+): Promise<void> {
+  for (const [name, value] of Object.entries(updates)) {
+    await db
+      .prepare(
+        `INSERT INTO app_settings(name, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(name) DO UPDATE SET
+           value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .bind(name, value, now)
+      .run();
+  }
+}
+
+function settingInt(
+  value: string | undefined,
+  minimum: number,
+  maximum: number,
+  fallback: number,
+): number {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= minimum && number <= maximum
+    ? number
+    : fallback;
+}
+
 export async function releaseRefreshLeases(
   db: D1Database,
   endpointIds: string[],

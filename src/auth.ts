@@ -6,10 +6,6 @@ export async function validateAccessRequest(
   request: Request,
   env: Env,
 ): Promise<void> {
-  if (env.AUTH_MODE !== "access") {
-    throw new AuthenticationError("Access authentication is not enabled");
-  }
-
   if (
     !env.ACCESS_TEAM_DOMAIN ||
     env.ACCESS_TEAM_DOMAIN.includes("replace-me") ||

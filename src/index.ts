@@ -1,11 +1,15 @@
 import { AuthenticationError, validateAccessRequest } from "./auth";
 import { getEndpointsByHostnames, getEndpointsByIds } from "./cortex";
-import { reconcileNoncompliantSerialList } from "./cloudflare-list";
+import {
+  listAvailableSerialLists,
+  reconcileNoncompliantSerialList,
+} from "./cloudflare-list";
 import { dashboardPage } from "./dashboard";
 import { evaluateEndpoint, findCortexEndpoint, normalizeHostname } from "./posture";
 import {
   claimDueEndpointIds,
   claimSyncLease,
+  getAppSettings,
   getDashboardIntegrations,
   getDeviceCounts,
   getSerialComplianceDecisions,
@@ -19,11 +23,13 @@ import {
   recordListSyncSuccess,
   releaseRefreshLeases,
   releaseSyncLease,
+  saveAppSettings,
   saveDeviceObservations,
   saveDeviceMappings,
   saveEndpointSnapshots,
   updateVerifiedDeviceSerials,
 } from "./repository";
+import type { AppSettings } from "./repository";
 import type {
   CloudflareDevice,
   CortexEndpoint,
@@ -62,6 +68,17 @@ export default {
         return getApiDevices(url, env);
       }
 
+      if (url.pathname === "/api/settings") {
+        if (request.method === "GET") return getApiSettings(env);
+        if (request.method === "PUT") return putApiSettings(request, env);
+        return methodNotAllowed("GET, PUT");
+      }
+
+      if (url.pathname === "/api/cloudflare/lists") {
+        if (request.method !== "GET") return methodNotAllowed("GET");
+        return getCloudflareLists(env);
+      }
+
       if (url.pathname !== "/check") {
         return json({ error: "not_found" }, 404);
       }
@@ -97,8 +114,7 @@ export default {
         serialNumber: string | null;
       }> = [];
       let staleCount = 0;
-      const staleAfter =
-        positiveNumber(env.SNAPSHOT_REFRESH_MINUTES, 5) * 2 * 60_000;
+      const staleAfter = snapshotRefreshMinutes(env) * 2 * 60_000;
 
       for (const device of devices) {
         const stored = evaluations.get(device.device_id);
@@ -213,27 +229,80 @@ export default {
   },
 
   async scheduled(_controller, env): Promise<void> {
-    if (env.CLOUDFLARE_LIST_SYNC_ENABLED.toLowerCase() === "true") {
-      let leaseToken: string | null = null;
-      try {
-        leaseToken = await claimSyncLease(
-          env.DB,
-          "cloudflare_serial_list",
-          Date.now(),
-        );
-        if (leaseToken) {
-          const result = await reconcileNoncompliantSerialList(env);
-          await recordListSyncSuccess(env.DB, result.count, Date.now());
-          console.log(
+    let settings: AppSettings | null = null;
+    try {
+      settings = await getAppSettings(env.DB);
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "scheduled_settings_error",
+          error: errorMessage(error),
+        }),
+      );
+    }
+
+    if (settings?.listSyncEnabled) {
+      if (settings.cloudflareAccountId && settings.serialListId) {
+        let leaseToken: string | null = null;
+        try {
+          leaseToken = await claimSyncLease(
+            env.DB,
+            "cloudflare_serial_list",
+            Date.now(),
+          );
+          if (leaseToken) {
+            const result = await reconcileNoncompliantSerialList(env, {
+              cloudflareAccountId: settings.cloudflareAccountId,
+              serialListId: settings.serialListId,
+              maxContentAgeDays: settings.maxContentAgeDays,
+              listMaxItems: settings.listMaxItems,
+            });
+            await recordListSyncSuccess(env.DB, result.count, Date.now());
+            console.log(
+              JSON.stringify({
+                event: "serial_denylist_synchronized",
+                changed: result.changed,
+                count: result.count,
+              }),
+            );
+          }
+        } catch (error) {
+          const detail = errorMessage(error);
+          try {
+            await recordListSyncError(env.DB, detail, Date.now());
+          } catch (statusError) {
+            console.error(
+              JSON.stringify({
+                event: "serial_denylist_status_error",
+                error: errorMessage(statusError),
+              }),
+            );
+          }
+          console.error(
             JSON.stringify({
-              event: "serial_denylist_synchronized",
-              changed: result.changed,
-              count: result.count,
+              event: "serial_denylist_sync_error",
+              error: detail,
             }),
           );
+        } finally {
+          if (leaseToken) {
+            await releaseSyncLease(
+              env.DB,
+              "cloudflare_serial_list",
+              leaseToken,
+            ).catch((error: unknown) => {
+              console.error(
+                JSON.stringify({
+                  event: "serial_denylist_lease_release_error",
+                  error: errorMessage(error),
+                }),
+              );
+            });
+          }
         }
-      } catch (error) {
-        const detail = errorMessage(error);
+      } else {
+        const detail =
+          "List synchronization is enabled but the Cloudflare account or list is not selected";
         try {
           await recordListSyncError(env.DB, detail, Date.now());
         } catch (statusError) {
@@ -245,30 +314,12 @@ export default {
           );
         }
         console.error(
-          JSON.stringify({
-            event: "serial_denylist_sync_error",
-            error: detail,
-          }),
+          JSON.stringify({ event: "serial_denylist_sync_error", error: detail }),
         );
-      } finally {
-        if (leaseToken) {
-          await releaseSyncLease(
-            env.DB,
-            "cloudflare_serial_list",
-            leaseToken,
-          ).catch((error: unknown) => {
-            console.error(
-              JSON.stringify({
-                event: "serial_denylist_lease_release_error",
-                error: errorMessage(error),
-              }),
-            );
-          });
-        }
       }
     }
 
-    const refreshMinutes = positiveNumber(env.SNAPSHOT_REFRESH_MINUTES, 5);
+    const refreshMinutes = snapshotRefreshMinutes(env);
     const cutoff = Date.now() - refreshMinutes * 60_000;
     let afterId = "";
     let queued = 0;
@@ -327,12 +378,14 @@ async function processRefreshMessage(
   message: RefreshMessage,
   env: RuntimeEnv,
 ): Promise<boolean> {
+  const maxContentAgeDays = await currentMaxContentAgeDays(env.DB);
+
   if (message.type === "refresh") {
     const endpoints = await getEndpointsByIds(message.endpointIds, env);
     const returnedIds = new Set(endpoints.map((endpoint) => endpoint.endpoint_id));
     const missingIds = message.endpointIds.filter((id) => !returnedIds.has(id));
     const now = Date.now();
-    await persistEvaluatedEndpoints(endpoints, env, now);
+    await persistEvaluatedEndpoints(endpoints, env, maxContentAgeDays, now);
     await markMissingEndpoints(env.DB, missingIds, now);
     if (message.leaseToken) {
       await releaseRefreshLeases(
@@ -395,16 +448,35 @@ async function processRefreshMessage(
   }
 
   await saveDeviceMappings(env.DB, mappings, observationId, observedAt);
-  await persistEvaluatedEndpoints([...matched.values()], env, now);
+  await persistEvaluatedEndpoints(
+    [...matched.values()],
+    env,
+    maxContentAgeDays,
+    now,
+  );
   return true;
+}
+
+async function currentMaxContentAgeDays(db: D1Database): Promise<number> {
+  try {
+    return (await getAppSettings(db)).maxContentAgeDays;
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "queue_settings_error",
+        error: errorMessage(error),
+      }),
+    );
+    return 7;
+  }
 }
 
 async function persistEvaluatedEndpoints(
   endpoints: CortexEndpoint[],
   env: RuntimeEnv,
+  maxContentAgeDays: number,
   now = Date.now(),
 ): Promise<void> {
-  const maxContentAgeDays = positiveNumber(env.MAX_CONTENT_AGE_DAYS, 7);
   const evaluations = new Map<string, Evaluation>();
 
   for (const endpoint of endpoints) {
@@ -486,8 +558,9 @@ async function getHealth(db: D1Database): Promise<Response> {
 
 async function getApiOverview(env: Env): Promise<Response> {
   const now = Date.now();
-  const maximumAgeDays = positiveNumber(env.MAX_CONTENT_AGE_DAYS, 7);
-  const refreshMinutes = positiveNumber(env.SNAPSHOT_REFRESH_MINUTES, 5);
+  const settings = await getAppSettings(env.DB);
+  const maximumAgeDays = settings.maxContentAgeDays;
+  const refreshMinutes = snapshotRefreshMinutes(env);
   const [integrations, devices, decisions] = await Promise.all([
     getDashboardIntegrations(env.DB),
     getDeviceCounts(env.DB),
@@ -500,6 +573,16 @@ async function getApiOverview(env: Env): Promise<Response> {
   return json({
     generated_at: now,
     maximum_content_age_days: maximumAgeDays,
+    list_sync: {
+      enabled: settings.listSyncEnabled,
+      ready: Boolean(
+        settings.cloudflareAccountId &&
+          settings.serialListId &&
+          cloudflareApiToken(env),
+      ),
+      list_id: settings.serialListId,
+      list_name: settings.serialListName,
+    },
     integrations,
     devices,
     noncompliant_serials: decisions.filter((decision) => decision.noncompliant)
@@ -525,10 +608,10 @@ async function getApiDevices(url: URL, env: Env): Promise<Response> {
     }
     limit = parsed;
   }
-  const maximumAgeDays = positiveNumber(env.MAX_CONTENT_AGE_DAYS, 7);
+  const settings = await getAppSettings(env.DB);
   const devices = await listDeviceCompliance(
     env.DB,
-    maximumAgeDays * 86_400_000,
+    settings.maxContentAgeDays * 86_400_000,
     statusParam,
     limit,
   );
@@ -538,6 +621,135 @@ async function getApiDevices(url: URL, env: Env): Promise<Response> {
     limit,
     devices,
   });
+}
+
+async function getApiSettings(env: Env): Promise<Response> {
+  const settings = await getAppSettings(env.DB);
+  return json({
+    settings,
+    cloudflare_api_token_configured: Boolean(cloudflareApiToken(env)),
+    cortex_configured: cortexConfigured(env),
+    sync_ready: Boolean(
+      settings.cloudflareAccountId &&
+        settings.serialListId &&
+        cloudflareApiToken(env),
+    ),
+  });
+}
+
+async function putApiSettings(request: Request, env: Env): Promise<Response> {
+  const body = await readRequestJson(request, 16 * 1024);
+  const updates = parseSettingsUpdate(body);
+  await saveAppSettings(env.DB, updates, Date.now());
+  return json({ settings: await getAppSettings(env.DB) });
+}
+
+async function getCloudflareLists(env: Env): Promise<Response> {
+  const apiToken = cloudflareApiToken(env);
+  if (!apiToken) throw new ClientError(400, "cloudflare_api_token_missing");
+  try {
+    const accounts = await listAvailableSerialLists(apiToken);
+    return json({ accounts });
+  } catch (error) {
+    throw new ClientError(
+      502,
+      `cloudflare_api_error: ${errorMessage(error)}`,
+    );
+  }
+}
+
+function cloudflareApiToken(env: Env): string | null {
+  return (
+    (env as Env & { CLOUDFLARE_API_TOKEN?: string }).CLOUDFLARE_API_TOKEN
+      ?.trim() || null
+  );
+}
+
+function cortexConfigured(env: Env): boolean {
+  return (
+    !!env.CORTEX_BASE_URL && !env.CORTEX_BASE_URL.includes("replace-")
+  );
+}
+
+function parseSettingsUpdate(body: unknown): Record<string, string> {
+  if (!isRecord(body)) throw new ClientError(400, "settings_object_required");
+  const updates: Record<string, string> = {};
+
+  if (body.cloudflareAccountId !== undefined) {
+    const value = settingsString(body.cloudflareAccountId);
+    if (value !== "" && !/^[a-f0-9]{32}$/i.test(value)) {
+      throw new ClientError(400, "invalid_cloudflare_account_id");
+    }
+    updates.cloudflare_account_id = value;
+  }
+  if (body.serialListId !== undefined) {
+    const value = settingsString(body.serialListId);
+    if (
+      value !== "" &&
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+        value,
+      )
+    ) {
+      throw new ClientError(400, "invalid_serial_list_id");
+    }
+    updates.serial_list_id = value;
+  }
+  if (body.serialListName !== undefined) {
+    const value = settingsString(body.serialListName);
+    if (value.length > 100) {
+      throw new ClientError(400, "invalid_serial_list_name");
+    }
+    updates.serial_list_name = value;
+  }
+  if (body.listSyncEnabled !== undefined) {
+    if (typeof body.listSyncEnabled !== "boolean") {
+      throw new ClientError(400, "invalid_list_sync_enabled");
+    }
+    updates.list_sync_enabled = body.listSyncEnabled ? "true" : "false";
+  }
+  if (body.maxContentAgeDays !== undefined) {
+    updates.max_content_age_days = String(
+      settingsInt(
+        body.maxContentAgeDays,
+        1,
+        365,
+        "invalid_max_content_age_days",
+      ),
+    );
+  }
+  if (body.listMaxItems !== undefined) {
+    updates.list_max_items = String(
+      settingsInt(body.listMaxItems, 1, 100_000, "invalid_list_max_items"),
+    );
+  }
+  if (Object.keys(updates).length === 0) {
+    throw new ClientError(400, "no_recognized_settings");
+  }
+  return updates;
+}
+
+function settingsString(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new ClientError(400, "invalid_settings_value");
+  }
+  return value.trim();
+}
+
+function settingsInt(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  error: string,
+): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < minimum ||
+    value > maximum
+  ) {
+    throw new ClientError(400, error);
+  }
+  return value;
 }
 
 async function readRequestJson(request: Request, maximum: number): Promise<unknown> {
@@ -644,9 +856,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function positiveNumber(value: string, fallback: number): number {
+function positiveNumber(value: string | undefined, fallback: number): number {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function snapshotRefreshMinutes(env: Env): number {
+  return positiveNumber(
+    (env as Env & { SNAPSHOT_REFRESH_MINUTES?: string })
+      .SNAPSHOT_REFRESH_MINUTES,
+    5,
+  );
 }
 
 function chunk<T>(values: T[], size: number): T[][] {

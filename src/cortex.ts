@@ -134,7 +134,7 @@ async function createCortexHeaders(
     "x-xdr-auth-id": env.CORTEX_API_KEY_ID,
   };
 
-  if (env.CORTEX_KEY_TYPE.toLowerCase() !== "advanced") {
+  if (keyType(env) !== "advanced") {
     headers.authorization = env.CORTEX_API_KEY;
     return headers;
   }
@@ -222,12 +222,16 @@ function requireCortexConfiguration(env: RuntimeEnv): void {
   ) {
     throw new Error("Cortex base URL must be an HTTPS origin");
   }
-  if (!["standard", "advanced"].includes(env.CORTEX_KEY_TYPE.toLowerCase())) {
+  if (!["standard", "advanced"].includes(keyType(env))) {
     throw new Error("Cortex key type must be standard or advanced");
   }
 }
 
-function positiveNumber(value: string, fallback: number): number {
+function keyType(env: RuntimeEnv): string {
+  return (env.CORTEX_KEY_TYPE ?? "advanced").toLowerCase();
+}
+
+function positiveNumber(value: string | undefined, fallback: number): number {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : fallback;
 }

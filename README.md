@@ -8,9 +8,10 @@ Access and Gateway policies use that list as a block condition. Healthy devices
 do not need an individual policy-time lookup, and unknown devices intentionally
 fail open until a later discovery and refresh cycle.
 
-The stale-content threshold is configured with `MAX_CONTENT_AGE_DAYS`. The
-default is seven days; set it to `14` if the desired grace period is two weeks.
-A read-only operations dashboard is included for observability.
+The stale-content threshold defaults to seven days and is managed from the
+operations dashboard, along with every other operational setting. The Worker
+never creates or evaluates policies; it only maintains the list, which you
+attach to policies as a condition.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/pongpisit/cloudflare-cortex-posture-worker)
 
@@ -40,15 +41,16 @@ database and refresh queues, applies migrations, and deploys the Worker through
 
 The deployment is intentionally inert until the remaining setup is completed:
 
-1. Update the vars in `wrangler.jsonc`: `CLOUDFLARE_ACCOUNT_ID`,
-   `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `CORTEX_BASE_URL`, and
-   `CLOUDFLARE_SERIAL_LIST_ID`.
+1. Update the three vars in `wrangler.jsonc`: `ACCESS_TEAM_DOMAIN`,
+   `ACCESS_AUD`, and `CORTEX_BASE_URL`.
 2. Set the secrets (`CORTEX_API_KEY`, `CORTEX_API_KEY_ID`,
    `CLOUDFLARE_API_TOKEN`) in the Worker or via `.dev.vars` locally.
-3. Follow [Custom Provider Setup](#custom-provider-setup) and
-   [Serial List Setup](#serial-list-setup) in the Zero Trust dashboard.
-4. Run the [smoke test](#smoke-testing) and the [validation](#validation)
-   checklist before enabling `CLOUDFLARE_LIST_SYNC_ENABLED`.
+3. Open the dashboard, select the Zero Trust list, and enable synchronization
+   (see [Dashboard](#dashboard)). All remaining configuration is managed there,
+   stored in D1, and applied on the next Cron run without a redeploy.
+4. Follow [Custom Provider Setup](#custom-provider-setup).
+5. Run the [smoke test](#smoke-testing) and the [validation](#validation)
+   checklist.
 
 The repository must be public for others to use the button.
 
@@ -75,7 +77,7 @@ The integration has three asynchronous stages:
    normalized hostname plus a matching MAC address.
 3. Cron refreshes known Cortex endpoints in batches and replaces the Zero Trust
    serial list with mapped devices whose `last_content_update_time` is older
-   than `MAX_CONTENT_AGE_DAYS`.
+   than the configured content-age threshold.
 
 Cortex documents `last_content_update_time` as a response field, not a supported
 `get_endpoint` filter. The Worker must therefore refresh known endpoint IDs in
@@ -137,6 +139,25 @@ The Worker consumes:
 | `mac_address[]` | MAC verification |
 | `last_content_update_time` | Sole noncompliance condition |
 
+### Test the Cortex API
+
+Verify the credentials and see exactly what the Worker sees, before deploying:
+
+```bash
+CORTEX_BASE_URL="https://<tenant-api-fqdn>" \
+CORTEX_API_KEY="<api-key>" \
+CORTEX_API_KEY_ID="<key-id>" \
+npm run cortex-test [hostname]
+```
+
+The script calls `POST /public_api/v1/endpoints/get_endpoint` with the same
+advanced-key signature the Worker sends (`x-xdr-auth-id`, `x-xdr-nonce`,
+`x-xdr-timestamp`, and the SHA-256 authorization digest), then prints each
+endpoint's `last_content_update_time`, its age, and whether it would be denied.
+Pass a hostname to filter to one device, or run it without arguments to sample
+five recently seen endpoints. Set `CORTEX_KEY_TYPE=standard` for tenants that
+issue standard security keys.
+
 ## Cloudflare Deployment
 
 ### 1. Install and authenticate
@@ -166,28 +187,19 @@ npm run migrate:remote
 
 ### 3. Configure variables
 
-Update `wrangler.jsonc`:
+Update `wrangler.jsonc` with the three remaining values:
 
 ```jsonc
 "ACCESS_TEAM_DOMAIN": "https://<team-name>.cloudflareaccess.com",
 "ACCESS_AUD": "<bridge-application-aud>",
-"CORTEX_BASE_URL": "https://<tenant-api-fqdn>",
-"CORTEX_KEY_TYPE": "advanced",
-"MAX_CONTENT_AGE_DAYS": "7",
-"SNAPSHOT_REFRESH_MINUTES": "5",
-"CLOUDFLARE_LIST_SYNC_ENABLED": "false",
-"CLOUDFLARE_ACCOUNT_ID": "<account-id>",
-"CLOUDFLARE_SERIAL_LIST_ID": "<zero-trust-list-id>",
-"CLOUDFLARE_SERIAL_LIST_NAME": "Cortex noncompliant devices",
-"CLOUDFLARE_LIST_MAX_ITEMS": "1000"
+"CORTEX_BASE_URL": "https://<tenant-api-fqdn>"
 ```
 
-Use `MAX_CONTENT_AGE_DAYS=14` for a 14-day threshold. Keep
-`CLOUDFLARE_LIST_SYNC_ENABLED=false` until the list exists, shadow validation is
-complete, and the API token is installed.
-
-Set `CLOUDFLARE_LIST_MAX_ITEMS` to the account entitlement: Zero Trust lists
-currently support 1,000 entries on Standard and 5,000 on Enterprise.
+Everything else is operational configuration managed from the
+[dashboard](#dashboard) and stored in D1: the Zero Trust list selection, the
+content-age threshold, the list capacity, and the synchronization switch. They
+use safe defaults, take effect on the next Cron run, and never require a
+redeploy.
 
 ### 4. Store secrets
 
@@ -263,19 +275,22 @@ Create the list before enabling synchronization:
 4. Set **List type** to **Serial numbers**.
 5. Add the initial placeholder value
    `__cortex_no_noncompliant_devices__` and save.
-6. Record the list ID and put it in `CLOUDFLARE_SERIAL_LIST_ID`.
 
 The sentinel cannot match a real managed device and permits a reliable
 non-empty API replacement when no devices are stale. Cloudflare does not
 document whether an empty `items` array clears a Zero Trust list.
 
-Deploy with synchronization disabled and inspect D1/logs first. When ready:
+Then select it from the dashboard:
 
-```jsonc
-"CLOUDFLARE_LIST_SYNC_ENABLED": "true"
-```
+1. Open `/dashboard` and select **Load lists**. The Worker uses the configured
+   `CLOUDFLARE_API_TOKEN` to list every account and `SERIAL` list the token can
+   see, so you pick the target from a dropdown instead of pasting a UUID.
+2. Choose the account and the list, set the content-age threshold and capacity,
+   and save the configuration.
+3. Enable synchronization once validation is complete. It stays off until you
+   turn it on.
 
-Redeploy. Every Cron cycle applies decisions from recently refreshed snapshots
+Every Cron cycle applies decisions from recently refreshed snapshots
 to the current list. Content age is measured at the snapshot's successful
 Cortex refresh time, so wall-clock aging during an outage cannot create a new
 denial. Membership without a fresh decision is preserved, and durable removal
@@ -316,12 +331,12 @@ list; the explicit `noncompliant` name avoids reversing the rule accidentally.
 
 ## Validation
 
-1. Leave `CLOUDFLARE_LIST_SYNC_ENABLED=false` initially.
+1. Leave list synchronization disabled in the dashboard initially.
 2. Confirm `/check` discovers pilot devices and D1 stores verified hostname/MAC
    mappings with serial numbers.
 3. Confirm endpoint snapshots contain normalized content-update timestamps.
 4. Compare the expected stale serial query with Cortex for pilot devices.
-5. Enable synchronization without attaching Block policies.
+5. Enable synchronization in the dashboard without attaching Block policies.
 6. Confirm stale serials are added and recovered serials are removed.
 7. Test capacity protection and a deliberately invalid API token; the previous
    list must remain unchanged.
@@ -364,23 +379,48 @@ timestamps. Relevant structured events include:
 - `scheduled_refresh`
 - `cortex_refresh_error`
 
-The Worker refuses to update when the desired count exceeds
-`CLOUDFLARE_LIST_MAX_ITEMS` and warns at 80% capacity.
+The Worker refuses to update when the desired count exceeds the configured list
+capacity and warns at 80% capacity.
 
 ## Dashboard
 
-`GET /dashboard` serves a read-only operations page behind the same Access
-application as `/check`. It shows integration health, device counts, the
-current noncompliant serial count, and a filterable device table (hostname,
-serial, MAC, score, reason, content age, refresh recency). The page refreshes
-every 60 seconds and makes no changes to data.
+`GET /dashboard` serves an operations page behind the same Access application
+as `/check`. It shows integration health, device counts, the current
+noncompliant serial count, and a filterable device table (hostname, serial,
+MAC, score, reason, content age, refresh recency). The page refreshes every 60
+seconds.
+
+The configuration panel manages all operational settings, stored in D1 and
+applied on the next Cron run without a redeploy:
+
+- **Load lists** uses the configured `CLOUDFLARE_API_TOKEN` to list the accounts
+  and `SERIAL` lists the token can see, so you pick the target list from a
+  dropdown instead of pasting a UUID.
+- **Content age threshold** and **list capacity** set the stale boundary and
+  the capacity safety limit (Zero Trust lists support 1,000 entries on Standard
+  and 5,000 on Enterprise).
+- **Enable list synchronization** is the master switch for list updates. It
+  stays disabled until you turn it on.
 
 JSON backing endpoints:
 
 | Endpoint | Description |
 | --- | --- |
-| `GET /api/overview` | Integration statuses, device counts, noncompliant serial count |
+| `GET /api/overview` | Integration statuses, device counts, noncompliant serial count, sync state |
 | `GET /api/devices?status=all\|noncompliant\|compliant&limit=N` | Per-device compliance rows, `limit` 1–500, default 200 |
+| `GET /api/settings` | Current operational settings and readiness flags |
+| `PUT /api/settings` | Update settings: `cloudflareAccountId`, `serialListId`, `serialListName`, `listSyncEnabled`, `maxContentAgeDays` (1–365), `listMaxItems` (1–100000) |
+| `GET /api/cloudflare/lists` | Accounts and `SERIAL` lists visible to the API token |
+
+Settings can also be updated directly:
+
+```bash
+curl -X PUT "https://cortex-posture.example.com/api/settings" \
+  -H "CF-Access-Client-Id: <service-token-client-id>" \
+  -H "CF-Access-Client-Secret: <service-token-client-secret>" \
+  -H "content-type: application/json" \
+  -d '{"serialListId": "<list-id>", "listSyncEnabled": true}'
+```
 
 The service-token Access policy alone does not render a login page. To open the
 dashboard in a browser, add an Include rule to the Worker Access application
@@ -438,24 +478,30 @@ matches remain unmapped.
 
 | Variable | Purpose |
 | --- | --- |
-| `ACCESS_TEAM_DOMAIN` | Expected Access JWT issuer |
+| `ACCESS_TEAM_DOMAIN` | Expected Access JWT issuer for the Worker's own API |
 | `ACCESS_AUD` | Bridge Access application audience |
 | `CORTEX_BASE_URL` | Cortex API HTTPS origin |
-| `CORTEX_KEY_TYPE` | `advanced` or `standard` |
-| `MAX_CONTENT_AGE_DAYS` | Stale-content threshold, typically `7` or `14` |
-| `CORTEX_TIMEOUT_MS` | Cortex request timeout |
-| `SNAPSHOT_REFRESH_MINUTES` | Known-endpoint refresh interval |
-| `CLOUDFLARE_LIST_SYNC_ENABLED` | Explicit list update switch |
-| `CLOUDFLARE_ACCOUNT_ID` | Account that owns the list |
-| `CLOUDFLARE_SERIAL_LIST_ID` | Existing Zero Trust SERIAL list ID |
-| `CLOUDFLARE_SERIAL_LIST_NAME` | Exact list name validated before writes |
-| `CLOUDFLARE_LIST_MAX_ITEMS` | Safety limit matching account entitlement |
 
 Secrets:
 
 - `CORTEX_API_KEY`
 - `CORTEX_API_KEY_ID`
-- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_API_TOKEN` (account-scoped Zero Trust Write; also powers the
+  dashboard list selector)
+
+Dashboard-managed settings (stored in D1, with defaults):
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| Cloudflare account | unset | Account that owns the managed list |
+| Serial list | unset | Zero Trust SERIAL list to manage |
+| Content age threshold | `7` days | Stale-content boundary; use `14` for two weeks |
+| List capacity | `1000` | Safety limit; `5000` on Enterprise entitlements |
+| List synchronization | disabled | Master switch for list updates |
+
+Advanced overrides (set as Worker dashboard variables only when needed):
+`SNAPSHOT_REFRESH_MINUTES` (`5`), `CORTEX_TIMEOUT_MS` (`15000`),
+`CORTEX_KEY_TYPE` (`advanced`).
 
 Official documentation:
 

@@ -46,4 +46,6 @@ export interface Evaluation {
 export type RuntimeEnv = Env & {
   CORTEX_API_KEY: string;
   CORTEX_API_KEY_ID: string;
+  CORTEX_KEY_TYPE?: string;
+  CORTEX_TIMEOUT_MS?: string;
 };

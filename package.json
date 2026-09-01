@@ -11,6 +11,7 @@
     "lint": "oxlint --deny-warnings src test",
     "migrate:local": "wrangler d1 migrations apply DB --local",
     "migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "cortex-test": "bash scripts/cortex-test.sh",
     "smoke": "bash scripts/smoke-test.sh",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
@@ -19,11 +20,8 @@
   },
   "cloudflare": {
     "bindings": {
-      "CLOUDFLARE_ACCOUNT_ID": {
-        "description": "Your Cloudflare account ID."
-      },
       "ACCESS_TEAM_DOMAIN": {
-        "description": "Your Zero Trust team domain, e.g. `https://myteam.cloudflareaccess.com`."
+        "description": "Your Zero Trust team domain, e.g. `https://myteam.cloudflareaccess.com`. Used to authenticate requests to this Worker's API."
       },
       "ACCESS_AUD": {
         "description": "AUD of the Access application protecting this Worker."
@@ -38,10 +36,7 @@
         "description": "Cortex XDR API key ID from the API Keys page."
       },
       "CLOUDFLARE_API_TOKEN": {
-        "description": "Cloudflare API token scoped to the account with **Zero Trust Write**."
-      },
-      "CLOUDFLARE_SERIAL_LIST_ID": {
-        "description": "ID of the Zero Trust SERIAL list this Worker manages."
+        "description": "Cloudflare API token scoped to the account with **Zero Trust Write**. Also powers the dashboard's list selector."
       }
     }
   },

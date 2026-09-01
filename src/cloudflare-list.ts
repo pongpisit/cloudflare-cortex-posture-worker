@@ -7,6 +7,7 @@ import {
 const API_BASE_URL = "https://api.cloudflare.com/client/v4";
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const EMPTY_LIST_SENTINEL = "__cortex_no_noncompliant_devices__";
+const FALLBACK_LIST_NAME = "Cortex noncompliant devices";
 
 interface ListItem {
   value?: string;
@@ -18,24 +19,46 @@ interface ZeroTrustList {
   name?: string;
   type?: string;
   count?: number;
+  description?: string;
   items?: ListItem[];
 }
 
-interface CloudflareReply {
+interface ApiEnvelope<T> {
   success?: boolean;
   errors?: Array<{ message?: string }>;
-  result?: ZeroTrustList;
+  result?: T;
 }
 
 export interface SerialListEnv {
-  CLOUDFLARE_ACCOUNT_ID: string;
-  CLOUDFLARE_SERIAL_LIST_ID: string;
-  CLOUDFLARE_SERIAL_LIST_NAME: string;
-  CLOUDFLARE_LIST_MAX_ITEMS: string;
-  MAX_CONTENT_AGE_DAYS: string;
-  SNAPSHOT_REFRESH_MINUTES: string;
   DB: D1Database;
   CLOUDFLARE_API_TOKEN?: string;
+  SNAPSHOT_REFRESH_MINUTES?: string;
+}
+
+export interface SerialListSyncConfig {
+  cloudflareAccountId: string;
+  serialListId: string;
+  maxContentAgeDays: number;
+  listMaxItems: number;
+}
+
+interface CloudflareListContext {
+  apiToken: string;
+  accountId: string;
+  listId: string;
+}
+
+export interface AvailableSerialList {
+  id: string;
+  name: string;
+  count: number;
+  description: string | null;
+}
+
+export interface AccountSerialLists {
+  accountId: string;
+  accountName: string;
+  lists: AvailableSerialList[];
 }
 
 export interface SerialListSyncResult {
@@ -45,12 +68,12 @@ export interface SerialListSyncResult {
 
 export async function reconcileNoncompliantSerialList(
   env: SerialListEnv,
+  config: SerialListSyncConfig,
   now = Date.now(),
 ): Promise<SerialListSyncResult> {
-  requireConfiguration(env);
-  const maximumAgeDays = positiveNumber(env.MAX_CONTENT_AGE_DAYS, 7);
+  requireConfiguration(env, config);
+  const maximumAge = config.maxContentAgeDays * 86_400_000;
   const refreshMinutes = positiveNumber(env.SNAPSHOT_REFRESH_MINUTES, 5);
-  const maximumAge = maximumAgeDays * 86_400_000;
   const refreshedAfter = now - refreshMinutes * 2 * 60_000;
   let decisions = await getSerialComplianceDecisions(
     env.DB,
@@ -60,7 +83,7 @@ export async function reconcileNoncompliantSerialList(
   let result: SerialListSyncResult = { changed: false, count: 0 };
   let stable = false;
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const currentResult = await syncSerialList(decisions, env);
+    const currentResult = await syncSerialList(decisions, env, config);
     result = {
       changed: result.changed || currentResult.changed,
       count: currentResult.count,
@@ -90,13 +113,11 @@ export async function reconcileNoncompliantSerialList(
 
 export async function syncSerialList(
   decisions: SerialComplianceDecision[],
-  env: Omit<
-    SerialListEnv,
-    "DB" | "MAX_CONTENT_AGE_DAYS" | "SNAPSHOT_REFRESH_MINUTES"
-  >,
+  env: Pick<SerialListEnv, "CLOUDFLARE_API_TOKEN">,
+  config: SerialListSyncConfig,
 ): Promise<SerialListSyncResult> {
-  requireConfiguration(env);
-  const current = await getList(env);
+  const ctx = requireConfiguration(env, config);
+  const current = await getList(ctx);
   const currentItems = listItems(current);
   const desired = new Map(
     currentItems
@@ -114,7 +135,7 @@ export async function syncSerialList(
   const serials = [...desired.keys()].sort((left, right) =>
     left.localeCompare(right),
   );
-  const maximumItems = positiveInteger(env.CLOUDFLARE_LIST_MAX_ITEMS, 1000);
+  const maximumItems = config.listMaxItems;
   if (serials.length > maximumItems) {
     throw new Error(
       `Noncompliant serial count ${serials.length} exceeds configured list limit ${maximumItems}`,
@@ -146,43 +167,71 @@ export async function syncSerialList(
     return { changed: false, count: serials.length };
   }
 
-  await callCloudflare(env, "PUT", {
-    name: env.CLOUDFLARE_SERIAL_LIST_NAME,
+  await callCloudflare(ctx, "PUT", {
+    name: current.name || FALLBACK_LIST_NAME,
     description: "Cortex endpoints with stale security content; managed by Worker",
     items: desiredItems,
   });
-  const verified = await getList(env);
+  const verified = await getList(ctx);
   if (!sameValues(listItems(verified), desiredItems)) {
     throw new Error("Cloudflare serial list verification failed");
   }
   return { changed: true, count: serials.length };
 }
 
-async function getList(
-  env: Omit<
-    SerialListEnv,
-    "DB" | "MAX_CONTENT_AGE_DAYS" | "SNAPSHOT_REFRESH_MINUTES"
-  >,
-): Promise<ZeroTrustList> {
-  const list = await callCloudflare(env, "GET");
-  validateList(list, env);
+export async function listAvailableSerialLists(
+  apiToken: string,
+): Promise<AccountSerialLists[]> {
+  const token = apiToken.trim();
+  if (!token) throw new Error("Cloudflare API token is not configured");
+  const accounts = await cfApiGet<
+    Array<{ id?: string; name?: string } | null>
+  >("/accounts", token);
+  const visibleAccounts = (Array.isArray(accounts) ? accounts : [])
+    .filter((account): account is { id: string; name?: string } =>
+      Boolean(account?.id),
+    )
+    .slice(0, 10);
+
+  const result: AccountSerialLists[] = [];
+  for (const account of visibleAccounts) {
+    const lists = await cfApiGet<ZeroTrustList[] | null>(
+      `/accounts/${encodeURIComponent(account.id)}/gateway/lists`,
+      token,
+    );
+    result.push({
+      accountId: account.id,
+      accountName: account.name ?? account.id,
+      lists: (Array.isArray(lists) ? lists : [])
+        .filter((list) => list.type === "SERIAL" && list.id && list.name)
+        .map((list) => ({
+          id: list.id as string,
+          name: list.name as string,
+          count: Number(list.count ?? 0),
+          description: list.description ?? null,
+        })),
+    });
+  }
+  return result;
+}
+
+async function getList(ctx: CloudflareListContext): Promise<ZeroTrustList> {
+  const list = await callCloudflare(ctx, "GET");
+  validateList(list, ctx);
   if (!Array.isArray(list.items)) {
-    list.items = await callCloudflareItems(env);
+    list.items = await callCloudflareItems(ctx);
   }
   return list;
 }
 
 async function callCloudflareItems(
-  env: Omit<
-    SerialListEnv,
-    "DB" | "MAX_CONTENT_AGE_DAYS" | "SNAPSHOT_REFRESH_MINUTES"
-  >,
+  ctx: CloudflareListContext,
 ): Promise<ListItem[]> {
-  const url = `${API_BASE_URL}/accounts/${encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID)}/gateway/lists/${encodeURIComponent(env.CLOUDFLARE_SERIAL_LIST_ID)}/items`;
+  const url = `${API_BASE_URL}/accounts/${encodeURIComponent(ctx.accountId)}/gateway/lists/${encodeURIComponent(ctx.listId)}/items`;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const response = await fetch(url, {
       method: "GET",
-      headers: { authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}` },
+      headers: { authorization: `Bearer ${ctx.apiToken}` },
       signal: AbortSignal.timeout(15_000),
     });
     if ((response.status === 429 || response.status >= 500) && attempt < 3) {
@@ -190,12 +239,15 @@ async function callCloudflareItems(
       await sleep(attempt * 500);
       continue;
     }
-    const parsed = await readJson<{
-      success?: boolean;
-      errors?: Array<{ message?: string }>;
-      result?: ListItem[];
-    }>(response, MAX_RESPONSE_BYTES);
-    if (!response.ok || parsed.success !== true || !Array.isArray(parsed.result)) {
+    const parsed = await readJson<ApiEnvelope<ListItem[]>>(
+      response,
+      MAX_RESPONSE_BYTES,
+    );
+    if (
+      !response.ok ||
+      parsed.success !== true ||
+      !Array.isArray(parsed.result)
+    ) {
       const detail = parsed.errors?.[0]?.message ?? `HTTP ${response.status}`;
       throw new Error(`Cloudflare Zero Trust list items request failed: ${detail}`);
     }
@@ -205,27 +257,24 @@ async function callCloudflareItems(
 }
 
 async function callCloudflare(
-  env: Omit<
-    SerialListEnv,
-    "DB" | "MAX_CONTENT_AGE_DAYS" | "SNAPSHOT_REFRESH_MINUTES"
-  >,
+  ctx: CloudflareListContext,
   method: "GET" | "PUT",
   body?: unknown,
 ): Promise<ZeroTrustList> {
-  const url = `${API_BASE_URL}/accounts/${encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID)}/gateway/lists/${encodeURIComponent(env.CLOUDFLARE_SERIAL_LIST_ID)}`;
+  const url = `${API_BASE_URL}/accounts/${encodeURIComponent(ctx.accountId)}/gateway/lists/${encodeURIComponent(ctx.listId)}`;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const response = await fetch(
       url,
       method === "GET"
         ? {
             method: "GET",
-            headers: { authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}` },
+            headers: { authorization: `Bearer ${ctx.apiToken}` },
             signal: AbortSignal.timeout(15_000),
           }
         : {
             method: "PUT",
             headers: {
-              authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`,
+              authorization: `Bearer ${ctx.apiToken}`,
               "content-type": "application/json",
             },
             body: JSON.stringify(body),
@@ -238,7 +287,10 @@ async function callCloudflare(
       continue;
     }
 
-    const parsed = await readJson<CloudflareReply>(response, MAX_RESPONSE_BYTES);
+    const parsed = await readJson<ApiEnvelope<ZeroTrustList>>(
+      response,
+      MAX_RESPONSE_BYTES,
+    );
     if (
       !response.ok ||
       parsed.success !== true ||
@@ -252,22 +304,56 @@ async function callCloudflare(
   throw new Error("Cloudflare Zero Trust list retry limit reached");
 }
 
-function validateList(
-  list: ZeroTrustList,
-  env: Omit<
-    SerialListEnv,
-    "DB" | "MAX_CONTENT_AGE_DAYS" | "SNAPSHOT_REFRESH_MINUTES"
-  >,
-): void {
-  if (list.id !== env.CLOUDFLARE_SERIAL_LIST_ID) {
+async function cfApiGet<T>(path: string, apiToken: string): Promise<T> {
+  const url = `${API_BASE_URL}${path}`;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { authorization: `Bearer ${apiToken}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if ((response.status === 429 || response.status >= 500) && attempt < 3) {
+      await response.body?.cancel();
+      await sleep(attempt * 500);
+      continue;
+    }
+    const parsed = await readJson<ApiEnvelope<T>>(response, MAX_RESPONSE_BYTES);
+    if (!response.ok || parsed.success !== true) {
+      const detail = parsed.errors?.[0]?.message ?? `HTTP ${response.status}`;
+      throw new Error(`Cloudflare API request failed: ${detail}`);
+    }
+    return parsed.result as T;
+  }
+  throw new Error("Cloudflare API retry limit reached");
+}
+
+function validateList(list: ZeroTrustList, ctx: CloudflareListContext): void {
+  if (list.id !== ctx.listId) {
     throw new Error("Cloudflare returned an unexpected Zero Trust list");
   }
   if (list.type !== "SERIAL") {
     throw new Error("Configured Zero Trust list must have type SERIAL");
   }
-  if (list.name !== env.CLOUDFLARE_SERIAL_LIST_NAME) {
-    throw new Error("Configured Zero Trust list name does not match");
+}
+
+function requireConfiguration(
+  env: Pick<SerialListEnv, "CLOUDFLARE_API_TOKEN">,
+  config: SerialListSyncConfig,
+): CloudflareListContext {
+  const apiToken = env.CLOUDFLARE_API_TOKEN?.trim();
+  if (
+    !apiToken ||
+    !config.cloudflareAccountId ||
+    !config.serialListId ||
+    config.serialListId.startsWith("replace-")
+  ) {
+    throw new Error("Cloudflare serial list synchronization is not configured");
   }
+  return {
+    apiToken,
+    accountId: config.cloudflareAccountId,
+    listId: config.serialListId,
+  };
 }
 
 function listItems(list: ZeroTrustList): Required<ListItem>[] {
@@ -282,23 +368,6 @@ function listItems(list: ZeroTrustList): Required<ListItem>[] {
   return [...items.entries()]
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([value, description]) => ({ value, description }));
-}
-
-function requireConfiguration(
-  env: Omit<
-    SerialListEnv,
-    "DB" | "MAX_CONTENT_AGE_DAYS" | "SNAPSHOT_REFRESH_MINUTES"
-  >,
-): void {
-  if (
-    !env.CLOUDFLARE_ACCOUNT_ID ||
-    !env.CLOUDFLARE_SERIAL_LIST_ID ||
-    env.CLOUDFLARE_SERIAL_LIST_ID.startsWith("replace-") ||
-    !env.CLOUDFLARE_SERIAL_LIST_NAME ||
-    !env.CLOUDFLARE_API_TOKEN
-  ) {
-    throw new Error("Cloudflare serial list synchronization is not configured");
-  }
 }
 
 function sameValues(left: ListItem[], right: ListItem[]): boolean {
@@ -358,14 +427,9 @@ async function readJson<T>(response: Response, maximum: number): Promise<T> {
   }
 }
 
-function positiveNumber(value: string, fallback: number): number {
+function positiveNumber(value: string | undefined, fallback: number): number {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : fallback;
-}
-
-function positiveInteger(value: string, fallback: number): number {
-  const number = Number(value);
-  return Number.isSafeInteger(number) && number > 0 ? number : fallback;
 }
 
 function sleep(milliseconds: number): Promise<void> {

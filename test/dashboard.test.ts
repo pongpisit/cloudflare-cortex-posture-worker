@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  getAppSettings,
   getDashboardIntegrations,
   getDeviceCounts,
   listDeviceCompliance,
@@ -10,6 +11,7 @@ function fakeDb<T>(rows: T[]): D1Database {
     bind: () => statement,
     all: async () => ({ results: rows }),
     first: async () => rows[0] ?? null,
+    run: async () => ({}),
   };
   return { prepare: () => statement } as unknown as D1Database;
 }
@@ -54,6 +56,37 @@ describe("dashboard repository", () => {
         updatedAt: 1000,
       },
     ]);
+  });
+
+  it("reads app settings with defaults when none are stored", async () => {
+    const db = fakeDb([]);
+    await expect(getAppSettings(db)).resolves.toEqual({
+      cloudflareAccountId: null,
+      serialListId: null,
+      serialListName: null,
+      listSyncEnabled: false,
+      maxContentAgeDays: 7,
+      listMaxItems: 1000,
+    });
+  });
+
+  it("maps stored app settings and ignores out-of-range values", async () => {
+    const db = fakeDb([
+      { name: "cloudflare_account_id", value: "aa8ab6fe5b7f906df426a972033e922a" },
+      { name: "serial_list_id", value: "6e9d70bf-68d7-4f45-9091-814b141ee656" },
+      { name: "serial_list_name", value: "Cortex noncompliant devices" },
+      { name: "list_sync_enabled", value: "true" },
+      { name: "max_content_age_days", value: "14" },
+      { name: "list_max_items", value: "5000" },
+    ]);
+    await expect(getAppSettings(db)).resolves.toEqual({
+      cloudflareAccountId: "aa8ab6fe5b7f906df426a972033e922a",
+      serialListId: "6e9d70bf-68d7-4f45-9091-814b141ee656",
+      serialListName: "Cortex noncompliant devices",
+      listSyncEnabled: true,
+      maxContentAgeDays: 14,
+      listMaxItems: 5000,
+    });
   });
 
   it("marks stale content noncompliant and fresh or missing content compliant", async () => {
