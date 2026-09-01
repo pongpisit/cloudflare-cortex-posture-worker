@@ -19,6 +19,7 @@ interface EvaluationRow {
   hostname: string;
   verified_mac: string;
   serial_number: string | null;
+  last_seen_at: number | null;
 }
 
 interface EndpointIdRow {
@@ -50,7 +51,7 @@ export async function getStoredEvaluations(
     const query = `
       SELECT m.cloudflare_device_id, m.cortex_endpoint_id,
              s.score, s.reason, s.cortex_refreshed_at,
-              m.hostname, m.verified_mac, m.serial_number
+              m.hostname, m.verified_mac, m.serial_number, m.last_seen_at
       FROM device_mappings m
       LEFT JOIN endpoint_snapshots s
         ON s.cortex_endpoint_id = m.cortex_endpoint_id
@@ -73,6 +74,7 @@ export async function getStoredEvaluations(
         hostname: row.hostname,
         verifiedMac: row.verified_mac,
         serialNumber: row.serial_number,
+        lastSeenAt: row.last_seen_at,
       });
     }
   }
@@ -142,6 +144,65 @@ export async function saveDeviceObservations(
       .bind(deviceId, observationId, observedAt),
   );
   for (const batch of chunk(statements, 100)) await db.batch(batch);
+}
+
+// Long-term hygiene: devices stop being touched once they leave the Cloudflare
+// inventory, which makes them eligible for the stale-device cleanup.
+export async function touchDeviceLastSeen(
+  db: D1Database,
+  deviceIds: string[],
+  now: number,
+): Promise<void> {
+  for (const ids of chunk(deviceIds, 80)) {
+    const placeholders = ids.map(() => "?").join(",");
+    await db
+      .prepare(
+        `UPDATE device_mappings
+         SET last_seen_at = ?
+         WHERE cloudflare_device_id IN (${placeholders})`,
+      )
+      .bind(now, ...ids)
+      .run();
+  }
+}
+
+export async function getStaleDeviceIds(
+  db: D1Database,
+  before: number,
+  limit: number,
+): Promise<string[]> {
+  const result = await db
+    .prepare(
+      `SELECT cloudflare_device_id FROM device_mappings
+       WHERE status = 'verified'
+         AND (
+           (last_seen_at IS NOT NULL AND last_seen_at <= ?)
+           OR (last_seen_at IS NULL AND updated_at <= ?)
+         )
+       ORDER BY cloudflare_device_id
+       LIMIT ?`,
+    )
+    .bind(before, before, limit)
+    .all<{ cloudflare_device_id: string }>();
+  return result.results.map((row) => row.cloudflare_device_id);
+}
+
+export async function getAppSettingValues(
+  db: D1Database,
+  names: string[],
+): Promise<Map<string, string>> {
+  const values = new Map<string, string>();
+  for (const chunked of chunk(names, 80)) {
+    const placeholders = chunked.map(() => "?").join(",");
+    const result = await db
+      .prepare(
+        `SELECT name, value FROM app_settings WHERE name IN (${placeholders})`,
+      )
+      .bind(...chunked)
+      .all<AppSettingRow>();
+    for (const row of result.results) values.set(row.name, row.value);
+  }
+  return values;
 }
 
 // Two refresh tiers. Endpoints whose last-known content is stale (current
@@ -303,7 +364,8 @@ export async function updateVerifiedDeviceSerials(
     db
       .prepare(
         `UPDATE device_mappings
-         SET serial_number = ?, updated_at = ?, last_verified_at = ?
+         SET serial_number = ?, updated_at = ?, last_verified_at = ?,
+             last_seen_at = ?
          WHERE cloudflare_device_id = ?
            AND status = 'verified'
            AND EXISTS (
@@ -312,7 +374,14 @@ export async function updateVerifiedDeviceSerials(
                AND o.observation_id = ?
            )`,
       )
-      .bind(serialNumber, observedAt, observedAt, deviceId, observationId),
+      .bind(
+        serialNumber,
+        observedAt,
+        observedAt,
+        observedAt,
+        deviceId,
+        observationId,
+      ),
     db
       .prepare(
         `DELETE FROM serial_removals
@@ -408,9 +477,9 @@ export async function saveDeviceMappings(
       `INSERT INTO device_mappings(
           cloudflare_device_id, serial_number, cortex_endpoint_id,
           hostname, verified_mac, status, created_at, updated_at,
-          last_verified_at
+          last_verified_at, last_seen_at
         )
-        SELECT ?, ?, ?, ?, ?, 'verified', ?, ?, ?
+        SELECT ?, ?, ?, ?, ?, 'verified', ?, ?, ?, ?
         WHERE EXISTS (
           SELECT 1 FROM device_observations o
           WHERE o.cloudflare_device_id = ? AND o.observation_id = ?
@@ -422,13 +491,15 @@ export async function saveDeviceMappings(
           verified_mac = excluded.verified_mac,
           status = 'verified',
           updated_at = excluded.updated_at,
-          last_verified_at = excluded.last_verified_at`,
+          last_verified_at = excluded.last_verified_at,
+          last_seen_at = excluded.last_seen_at`,
       ).bind(
       device.device_id,
       serialNumber,
       endpoint.endpoint_id,
       normalizeHostname(device.hostname),
       verifiedMac,
+      observedAt,
       observedAt,
       observedAt,
       observedAt,
@@ -971,7 +1042,7 @@ export async function deleteDevices(
       .prepare(`DELETE FROM device_observations WHERE cloudflare_device_id = ?`)
       .bind(deviceId),
   ]);
-  const snapshotCleanup = [...endpoints].map((endpointId) =>
+  const orphanCleanup = [...endpoints].flatMap((endpointId) => [
     db
       .prepare(
         `DELETE FROM endpoint_snapshots
@@ -981,9 +1052,18 @@ export async function deleteDevices(
            )`,
       )
       .bind(endpointId, endpointId),
-  );
+    db
+      .prepare(
+        `DELETE FROM refresh_leases
+         WHERE cortex_endpoint_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM device_mappings WHERE cortex_endpoint_id = ?
+           )`,
+      )
+      .bind(endpointId, endpointId),
+  ]);
 
-  const statements = [...tombstones, ...removals, ...snapshotCleanup];
+  const statements = [...tombstones, ...removals, ...orphanCleanup];
   for (const batch of chunk(statements, 100)) await db.batch(batch);
   return deleted;
 }

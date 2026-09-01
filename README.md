@@ -542,6 +542,37 @@ Worker itself accepts. The script also verifies that requests without Access
 credentials are rejected, and that invalid query parameters fail with `400`
 rather than being ignored.
 
+## Long-Term Operation
+
+The system is designed to run unattended for years. What ages, and how it is
+handled:
+
+- **Credential expiry is the main silent risk.** Cloudflare service tokens
+  default to one year; API tokens and Cortex keys have their own lifetimes.
+  When a credential dies, the dashboard shows it: the Provider pill goes
+  degraded when `/check` polls stop, and the Cortex and serial-list pills go
+  degraded when their APIs fail. Rotate the three secrets, recreate the
+  service provider integration, and verify all pills return healthy. Check
+  expiry dates at least twice a year.
+- **Departed devices are cleaned up automatically.** Each `/check` poll
+  touches a `last_seen_at` value per device (at most one write per device
+  per day), and a daily job deletes mappings unseen for
+  `STALE_DEVICE_DAYS` (default 30), tombstoning their serials so the
+  denylist is cleaned on the next sync. The job only runs while the provider
+  is actively polling, so a dead integration can never wipe the table.
+- **Malformed queue messages are dropped, not retried**, so poison messages
+  cannot fill the dead-letter queue. Inspect genuine repeated failures with
+  `npx wrangler queues consumer list` and the dashboard's debug log.
+- **The Worker self-provisions its schema** and re-points mappings when the
+  Cortex agent is reinstalled (see Endpoint identity over time), so re-imaged
+  fleets require no manual reconciliation.
+- **Monitoring:** point an external uptime monitor at `GET /health` and review
+  the dashboard periodically. All state lives in D1 and every operational
+  decision is visible as a structured log event.
+- **Dependencies are minimal** (`jose` for JWT validation). Run `npm audit`
+  and `npm run check` during any routine maintenance window; `npx wrangler
+  rollback` restores the previous Worker version if a deploy misbehaves.
+
 ## Failure Model
 
 This design intentionally fails open for devices not already present in the
@@ -597,7 +628,8 @@ Dashboard-managed settings (stored in D1, with defaults):
 
 Advanced overrides (set as Worker dashboard variables only when needed):
 `RECOVERY_REFRESH_MINUTES` (`30`), `DETECTION_REFRESH_MINUTES` (`240`),
-`CORTEX_TIMEOUT_MS` (`15000`), `CORTEX_KEY_TYPE` (`advanced`).
+`STALE_DEVICE_DAYS` (`30`), `CORTEX_TIMEOUT_MS` (`15000`),
+`CORTEX_KEY_TYPE` (`advanced`).
 
 Official documentation:
 

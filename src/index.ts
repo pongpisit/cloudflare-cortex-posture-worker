@@ -14,6 +14,8 @@ import {
   clearDebugLog,
   deleteDevices,
   getAppSettings,
+  getAppSettingValues,
+  getStaleDeviceIds,
   bootstrapAppSettings,
   getDashboardIntegrations,
   getDeviceComplianceByDeviceId,
@@ -38,6 +40,7 @@ import {
   saveDeviceObservations,
   saveDeviceMappings,
   saveEndpointSnapshots,
+  touchDeviceLastSeen,
   updateVerifiedDeviceSerials,
 } from "./repository";
 import type { AppSettings, DeviceCompliance } from "./repository";
@@ -159,8 +162,10 @@ export default {
         deviceId: string;
         serialNumber: string | null;
       }> = [];
+      const seenTouches: string[] = [];
       let staleCount = 0;
       const staleAfter = detectionRefreshMinutes(env) * 2 * 60_000;
+      const touchAfter = 24 * 60 * 60_000;
 
       for (const device of devices) {
         const stored = evaluations.get(device.device_id);
@@ -185,6 +190,10 @@ export default {
           invalidDeviceIds.push(device.device_id);
           discoveries.push(device);
           continue;
+        }
+
+        if (!stored.lastSeenAt || observedAt - stored.lastSeenAt > touchAfter) {
+          seenTouches.push(device.device_id);
         }
 
         if (currentSerial !== storedSerial) {
@@ -242,6 +251,18 @@ export default {
           observationId,
           observedAt,
         ),
+        // Provider liveness + daily per-device last-seen touch. These power
+        // the dashboard's provider indicator and the stale-device cleanup.
+        devices.length > 0
+          ? saveAppSettings(
+              env.DB,
+              { last_check_at: String(observedAt) },
+              observedAt,
+            )
+          : Promise.resolve(),
+        seenTouches.length > 0
+          ? touchDeviceLastSeen(env.DB, seenTouches, observedAt)
+          : Promise.resolve(),
       ]);
 
       ctx.waitUntil(
@@ -412,10 +433,21 @@ export default {
     }
 
     console.log(JSON.stringify({ event: "scheduled_refresh", queued }));
+
+    await runStaleDeviceCleanup(env, Date.now());
   },
 
   async queue(batch, env): Promise<void> {
     for (const message of batch.messages) {
+      if (!isRefreshMessage(message.body)) {
+        // A malformed message can never succeed on retry; drop it instead of
+        // cycling through the DLQ forever.
+        console.error(
+          JSON.stringify({ event: "queue_message_dropped", reason: "malformed" }),
+        );
+        message.ack();
+        continue;
+      }
       try {
         const runtimeEnv = requireRuntimeEnv(env);
         const calledCortex = await processRefreshMessage(message.body, runtimeEnv);
@@ -432,6 +464,68 @@ export default {
     }
   },
 } satisfies ExportedHandler<Env, RefreshMessage>;
+
+function isRefreshMessage(value: unknown): value is RefreshMessage {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.type === "refresh") {
+    return (
+      Array.isArray(candidate.endpointIds) &&
+      candidate.endpointIds.every((id) => typeof id === "string")
+    );
+  }
+  if (candidate.type === "discover") {
+    return Array.isArray(candidate.devices);
+  }
+  return false;
+}
+
+// Daily hygiene: devices that left the Cloudflare inventory stop being touched
+// by /check polls, so their mappings are removed once they have not been seen
+// for STALE_DEVICE_DAYS (default 30). The cleanup only runs while the
+// provider is actively polling, so a dead provider integration can never wipe
+// the tracking table.
+async function runStaleDeviceCleanup(env: Env, now: number): Promise<void> {
+  try {
+    const values = await getAppSettingValues(env.DB, [
+      "last_stale_cleanup_at",
+      "last_check_at",
+    ]);
+    const lastCleanup = Number(values.get("last_stale_cleanup_at") ?? 0);
+    if (now - lastCleanup < 24 * 60 * 60_000) return;
+
+    const lastCheck = Number(values.get("last_check_at") ?? 0);
+    if (!lastCheck || now - lastCheck > 24 * 60 * 60_000) return;
+
+    const staleDays = positiveNumber(
+      (env as Env & { STALE_DEVICE_DAYS?: string }).STALE_DEVICE_DAYS,
+      30,
+    );
+    const staleBefore = now - staleDays * 86_400_000;
+    const staleIds = await getStaleDeviceIds(env.DB, staleBefore, 1000);
+    await saveAppSettings(
+      env.DB,
+      { last_stale_cleanup_at: String(now) },
+      now,
+    );
+    if (staleIds.length === 0) return;
+    await deleteDevices(env.DB, staleIds, now);
+    console.log(
+      JSON.stringify({
+        event: "stale_device_cleanup",
+        deleted: staleIds.length,
+        older_than_days: staleDays,
+      }),
+    );
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "stale_device_cleanup_error",
+        error: errorMessage(error),
+      }),
+    );
+  }
+}
 
 async function processRefreshMessage(
   message: RefreshMessage,
@@ -743,7 +837,7 @@ async function getApiOverview(env: Env): Promise<Response> {
   const settings = await getAppSettings(env.DB);
   const maximumAgeDays = settings.maxContentAgeDays;
   const refreshMinutes = recoveryRefreshMinutes(env);
-  const [integrations, devices, decisions] = await Promise.all([
+  const [integrations, devices, decisions, providerValues] = await Promise.all([
     getDashboardIntegrations(env.DB),
     getDeviceCounts(env.DB),
     getSerialComplianceDecisions(
@@ -751,10 +845,16 @@ async function getApiOverview(env: Env): Promise<Response> {
       maximumAgeDays * 86_400_000,
       now - refreshMinutes * 2 * 60_000,
     ),
+    getAppSettingValues(env.DB, ["last_check_at"]),
   ]);
+  const providerLastCheckAt = Number(providerValues.get("last_check_at") ?? 0);
   return json({
     generated_at: now,
     maximum_content_age_days: maximumAgeDays,
+    provider: {
+      last_check_at: providerLastCheckAt || null,
+      stale: !providerLastCheckAt || now - providerLastCheckAt > 30 * 60_000,
+    },
     list_sync: {
       enabled: settings.listSyncEnabled,
       ready: Boolean(

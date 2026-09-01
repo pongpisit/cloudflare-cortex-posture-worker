@@ -291,6 +291,25 @@ const DASHBOARD_HTML = `<!doctype html>
 
     var pills = document.getElementById("pills");
     pills.textContent = "";
+    if (o.provider) {
+      var providerPill = el("div", "pill");
+      var providerDot = el(
+        "span",
+        "dot" + (o.provider.stale ? " degraded" : " healthy")
+      );
+      providerPill.appendChild(providerDot);
+      providerPill.appendChild(el("span", null, "Provider"));
+      providerPill.appendChild(
+        el(
+          "span",
+          "meta",
+          o.provider.stale
+            ? "no /check received recently"
+            : "last check " + rel(o.provider.last_check_at)
+        )
+      );
+      pills.appendChild(providerPill);
+    }
     (o.integrations || []).forEach(function (i) {
       var p = el("div", "pill");
       var dot = el("span", "dot" + (i.status === "healthy" ? " healthy" : i.status === "degraded" ? " degraded" : ""));

@@ -27,6 +27,7 @@ export interface StoredEvaluation {
   hostname: string;
   verifiedMac: string;
   serialNumber: string | null;
+  lastSeenAt: number | null;
 }
 
 export type RefreshMessage =
