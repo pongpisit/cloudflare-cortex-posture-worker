@@ -409,20 +409,24 @@ applied on the next Cron run without a redeploy:
   for the next Cron cycle.
 
 Each device row has a **Check** button that refreshes that single device from
-Cortex on demand and updates the row with the result.
+Cortex on demand and updates the row with the result. Rows also have
+checkboxes (with select-all) — **Check selected** refreshes up to 100 devices
+in a single Cortex request. The **search bar** filters devices by hostname,
+serial, or MAC address.
 
-The **Debug log** panel shows the most recent Cortex requests and responses —
-method, URL, status, duration, headers (authorization redacted), and bodies.
-It is controlled by the **Log Cortex traffic** setting and retains the last
-200 entries in D1.
+The **Debug log** button opens a chat-style popup that streams the most recent
+Cortex requests and responses live — requests appear as outgoing bubbles,
+responses as incoming ones, with method, URL, status, duration, headers
+(authorization redacted), and bodies behind a click. It is controlled by the
+**Log Cortex traffic** setting and retains the last 200 entries in D1.
 
 JSON backing endpoints:
 
 | Endpoint | Description |
 | --- | --- |
 | `GET /api/overview` | Integration statuses, device counts, noncompliant serial count, sync state |
-| `GET /api/devices?status=all\|noncompliant\|compliant&limit=N` | Per-device compliance rows, `limit` 1–500, default 200 |
-| `POST /api/devices/refresh` | Refresh one device from Cortex immediately (`{"deviceId": "..."}`) |
+| `GET /api/devices?status=all\|noncompliant\|compliant&search=<text>&limit=N` | Per-device compliance rows with optional search, `limit` 1–500, default 200 |
+| `POST /api/devices/refresh` | Refresh devices from Cortex immediately: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100 |
 | `POST /api/sync` | Run the list synchronization immediately |
 | `GET /api/debug-log?limit=N` | Recent Cortex request/response pairs, `limit` 1–200, default 50 |
 | `DELETE /api/debug-log` | Clear the debug log |

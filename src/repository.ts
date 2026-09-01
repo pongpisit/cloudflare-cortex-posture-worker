@@ -807,6 +807,7 @@ export async function listDeviceCompliance(
   maximumContentAge: number,
   status: DeviceComplianceFilter,
   limit: number,
+  search?: string,
 ): Promise<DeviceCompliance[]> {
   const where =
     status === "noncompliant"
@@ -814,6 +815,9 @@ export async function listDeviceCompliance(
       : status === "compliant"
         ? `NOT COALESCE((${NONCOMPLIANT_EXPRESSION}), 0)`
         : "TRUE";
+  const searchClause = search
+    ? `AND (m.hostname LIKE ? OR TRIM(m.serial_number) LIKE ? OR m.verified_mac LIKE ?)`
+    : "";
   const result = await db
     .prepare(
       `SELECT m.cloudflare_device_id,
@@ -828,7 +832,7 @@ export async function listDeviceCompliance(
        FROM device_mappings m
        LEFT JOIN endpoint_snapshots s
          ON s.cortex_endpoint_id = m.cortex_endpoint_id
-       WHERE ${where}
+       WHERE ${where} ${searchClause}
        ORDER BY CASE WHEN ${NONCOMPLIANT_EXPRESSION} THEN 0 ELSE 1 END,
                 m.hostname,
                 m.cloudflare_device_id
@@ -836,6 +840,7 @@ export async function listDeviceCompliance(
     )
     .bind(
       ...(status === "all" ? [] : [maximumContentAge]),
+      ...(search ? [`%${search}%`, `%${search}%`, `%${search}%`] : []),
       maximumContentAge,
       limit,
     )
@@ -867,18 +872,34 @@ function isRowNoncompliant(
   );
 }
 
-export async function getDeviceMappingByDeviceId(
+interface DeviceMappingRow {
+  cloudflare_device_id: string;
+  cortex_endpoint_id: string;
+}
+
+export async function getDeviceMappingsByDeviceIds(
   db: D1Database,
-  deviceId: string,
-): Promise<{ cortexEndpointId: string } | null> {
-  const row = await db
-    .prepare(
-      `SELECT cortex_endpoint_id FROM device_mappings
-       WHERE cloudflare_device_id = ? LIMIT 1`,
-    )
-    .bind(deviceId)
-    .first<{ cortex_endpoint_id: string }>();
-  return row ? { cortexEndpointId: row.cortex_endpoint_id } : null;
+  deviceIds: string[],
+): Promise<Array<{ cloudflareDeviceId: string; cortexEndpointId: string }>> {
+  const result: Array<{ cloudflareDeviceId: string; cortexEndpointId: string }> =
+    [];
+  for (const ids of chunk(deviceIds, 80)) {
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = await db
+      .prepare(
+        `SELECT cloudflare_device_id, cortex_endpoint_id FROM device_mappings
+         WHERE cloudflare_device_id IN (${placeholders})`,
+      )
+      .bind(...ids)
+      .all<DeviceMappingRow>();
+    result.push(
+      ...rows.results.map((row) => ({
+        cloudflareDeviceId: row.cloudflare_device_id,
+        cortexEndpointId: row.cortex_endpoint_id,
+      })),
+    );
+  }
+  return result;
 }
 
 export async function getDeviceComplianceByDeviceId(

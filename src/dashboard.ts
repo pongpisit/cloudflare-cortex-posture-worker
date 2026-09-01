@@ -48,23 +48,40 @@ const DASHBOARD_HTML = `<!doctype html>
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   .row-check { border: 1px solid #cbd6e0; background: #fff; padding: 2px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; color: #1c2733; }
   .row-check:disabled { opacity: .5; cursor: default; }
+  #search { flex: 1; min-width: 170px; max-width: 280px; padding: 7px 10px; border: 1px solid #cbd6e0; border-radius: 8px; font-size: 13px; background: #fff; color: #1c2733; }
+  #refresh-status { min-height: 16px; max-width: 300px; text-align: right; }
+  .row-select, #select-all { cursor: pointer; }
   .toolbar-right { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   tr.flash td { animation: rowflash 1.6s ease-out; }
   @keyframes rowflash { 0% { background: #fff3cd; } 100% { background: transparent; } }
-  .overlay { position: fixed; inset: 0; background: rgba(28,39,51,.45); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
-  .overlay[hidden] { display: none; }
-  .overlay-panel { background: #fff; border-radius: 12px; width: min(880px, 100%); max-height: 85vh; display: flex; flex-direction: column; overflow: hidden; }
-  .overlay-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid #e2e8ee; }
-  .overlay-head .label { font-size: 12px; color: #5b6b7b; text-transform: uppercase; letter-spacing: .04em; }
-  .overlay-actions { display: flex; gap: 8px; }
-  .overlay-actions button { border: 1px solid #cbd6e0; background: #fff; padding: 6px 14px; border-radius: 8px; font-size: 13px; cursor: pointer; color: #1c2733; }
+  .chat-fab { position: fixed; right: 20px; bottom: 20px; z-index: 60; background: #1c2733; color: #fff; padding: 10px 18px; border-radius: 999px; font-size: 13px; cursor: pointer; box-shadow: 0 6px 18px rgba(28,39,51,.35); user-select: none; }
+  .chat-fab:hover { background: #2c3e52; }
+  .chat-popup { position: fixed; right: 20px; bottom: 70px; z-index: 61; width: min(440px, calc(100vw - 40px)); max-height: 62vh; background: #fff; border: 1px solid #e2e8ee; border-radius: 14px; box-shadow: 0 12px 32px rgba(28,39,51,.28); display: flex; flex-direction: column; overflow: hidden; animation: popup-in .18s ease-out; }
+  .chat-popup[hidden] { display: none; }
+  @keyframes popup-in { 0% { transform: translateY(10px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
+  .chat-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid #e2e8ee; background: #fafbfc; }
+  .chat-title { font-size: 12px; color: #1c2733; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; display: flex; align-items: center; gap: 8px; }
+  .live-dot { width: 9px; height: 9px; border-radius: 50%; background: #27ae60; display: inline-block; animation: pulse 1.6s infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(39,174,96,.4); } 70% { box-shadow: 0 0 0 7px rgba(39,174,96,0); } 100% { box-shadow: 0 0 0 0 rgba(39,174,96,0); } }
+  .overlay-actions { display: flex; gap: 6px; }
+  .overlay-actions button { border: 1px solid #cbd6e0; background: #fff; padding: 4px 12px; border-radius: 8px; font-size: 12px; cursor: pointer; color: #1c2733; }
   .overlay-actions button.primary { background: #1c2733; color: #fff; border-color: #1c2733; }
-  .overlay-body { overflow: auto; padding: 12px 18px 18px; }
-  .debug-item { border: 1px solid #e2e8ee; border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; }
-  .debug-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .debug-url { font-size: 12px; word-break: break-all; }
-  .debug-body summary { cursor: pointer; font-size: 12px; color: #5b6b7b; margin: 6px 0; }
-  .debug-body pre { background: #fafbfc; border: 1px solid #eef2f6; border-radius: 6px; padding: 8px 10px; overflow: auto; max-height: 240px; margin: 4px 0; white-space: pre-wrap; word-break: break-all; }
+  .chat-body { overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; scroll-behavior: smooth; }
+  .chat-row { display: flex; }
+  .chat-row.request { justify-content: flex-end; }
+  .chat-row.response { justify-content: flex-start; }
+  .chat-bubble { max-width: 88%; border-radius: 12px; padding: 7px 11px; font-size: 12px; border: 1px solid #e2e8ee; background: #fafbfc; }
+  .chat-row.request .chat-bubble { background: #1c2733; color: #fff; border-color: #1c2733; }
+  .chat-row.fresh .chat-bubble { animation: bubble-in .25s ease-out; }
+  @keyframes bubble-in { 0% { transform: translateY(8px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
+  .chat-bubble .chip { margin-right: 6px; }
+  .chat-bubble-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; cursor: pointer; }
+  .chat-row.request .chat-bubble-head { color: #fff; }
+  .chat-meta { opacity: .75; font-size: 11px; }
+  .chat-bubble pre { display: none; background: rgba(255,255,255,.9); color: #1c2733; border-radius: 8px; padding: 8px 10px; overflow: auto; max-height: 220px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; font-size: 11px; }
+  .chat-row.request .chat-bubble pre { background: rgba(255,255,255,.12); color: #e8edf3; }
+  .chat-bubble.open pre { display: block; }
+  .debug-empty { color: #5b6b7b; font-size: 12px; text-align: center; padding: 14px 0; }
   .config { background: #fff; border: 1px solid #e2e8ee; border-radius: 10px; padding: 16px; margin-bottom: 20px; }
   .config-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
   .config-head .label { font-size: 12px; color: #5b6b7b; text-transform: uppercase; letter-spacing: .04em; }
@@ -123,20 +140,23 @@ const DASHBOARD_HTML = `<!doctype html>
     <div class="meta config-message" id="config-message"></div>
   </div>
   <div class="toolbar">
+    <input id="search" type="search" placeholder="Search hostname, serial, or MAC">
     <div class="filters" id="filters">
       <button type="button" data-status="all" class="active">All</button>
       <button type="button" data-status="noncompliant">Noncompliant</button>
       <button type="button" data-status="compliant">Compliant</button>
     </div>
+    <button type="button" id="check-selected" class="row-check" disabled>Check selected</button>
     <div class="toolbar-right">
-      <button type="button" id="open-debug" class="row-check">Debug log</button>
       <div class="sub" id="count"></div>
+      <span class="meta" id="refresh-status"></span>
     </div>
   </div>
   <div class="tablewrap">
     <table>
       <thead>
         <tr>
+          <th><input type="checkbox" id="select-all" aria-label="Select all"></th>
           <th></th><th>Hostname</th><th>Serial</th><th>MAC</th><th>Compliance</th>
           <th>Mapping</th><th>Score</th><th>Reason</th>
           <th>Content updated</th><th>Refreshed</th>
@@ -146,24 +166,25 @@ const DASHBOARD_HTML = `<!doctype html>
     </table>
   </div>
 </div>
-<div class="overlay" id="debug-overlay" hidden>
-  <div class="overlay-panel">
-    <div class="overlay-head">
-      <span class="label">Cortex request log</span>
-      <div class="overlay-actions">
-        <button type="button" id="debug-refresh">Refresh</button>
-        <button type="button" id="debug-clear">Clear</button>
-        <button type="button" id="debug-close" class="primary">Close</button>
-      </div>
+<div class="chat-popup" id="chat-popup" hidden>
+  <div class="chat-head">
+    <span class="chat-title"><span class="live-dot"></span> Cortex request log</span>
+    <div class="overlay-actions">
+      <button type="button" id="debug-clear">Clear</button>
+      <button type="button" id="debug-close" class="primary">Close</button>
     </div>
-    <div class="overlay-body" id="debug-entries"></div>
   </div>
+  <div class="chat-body" id="debug-entries"></div>
 </div>
+<div class="chat-fab" id="chat-fab" role="button" tabindex="0">Debug log</div>
 <script>
 (function () {
   "use strict";
   var status = "all";
   var limit = 200;
+  var search = "";
+  var selectedIds = [];
+  var renderedIds = [];
 
   function rel(ms) {
     if (!ms) return "never";
@@ -239,6 +260,12 @@ const DASHBOARD_HTML = `<!doctype html>
       tr.appendChild(c);
       return c;
     }
+    var selectCell = td(null);
+    var box = el("input", "row-select");
+    box.type = "checkbox";
+    box.setAttribute("data-device-id", row.cloudflareDeviceId);
+    box.checked = selectedIds.indexOf(row.cloudflareDeviceId) !== -1;
+    selectCell.appendChild(box);
     var checkCell = td(null);
     var button = el("button", "row-check", "Check");
     button.type = "button";
@@ -260,11 +287,22 @@ const DASHBOARD_HTML = `<!doctype html>
   function renderDevices(payload) {
     var tbody = document.getElementById("rows");
     tbody.textContent = "";
+    renderedIds = (payload.devices || []).map(function (row) {
+      return row.cloudflareDeviceId;
+    });
     (payload.devices || []).forEach(function (row) {
       tbody.appendChild(renderDeviceRow(row));
     });
+    var selectAll = document.getElementById("select-all");
+    selectAll.checked =
+      renderedIds.length > 0 &&
+      renderedIds.every(function (id) {
+        return selectedIds.indexOf(id) !== -1;
+      });
+    updateBulkButton();
     document.getElementById("count").textContent =
-      (payload.devices || []).length + " of max " + limit + " devices shown";
+      (payload.devices || []).length + " of max " + limit + " devices shown" +
+      (search ? " \\u00b7 matching \\u201c" + search + "\\u201d" : "");
   }
 
   function showError(msg) {
@@ -436,15 +474,17 @@ const DASHBOARD_HTML = `<!doctype html>
   }
 
   var debugTimer = null;
+  var lastMaxDebugId = null;
+  var pinnedToBottom = true;
 
   function openDebug() {
-    document.getElementById("debug-overlay").hidden = false;
+    document.getElementById("chat-popup").hidden = false;
     loadDebug();
-    debugTimer = setInterval(loadDebug, 5000);
+    debugTimer = setInterval(loadDebug, 2000);
   }
 
   function closeDebug() {
-    document.getElementById("debug-overlay").hidden = true;
+    document.getElementById("chat-popup").hidden = true;
     if (debugTimer) {
       clearInterval(debugTimer);
       debugTimer = null;
@@ -477,22 +517,33 @@ const DASHBOARD_HTML = `<!doctype html>
   }
 
   function renderDebug(entries) {
-    var container = document.getElementById("debug-entries");
-    container.textContent = "";
+    var body = document.getElementById("debug-entries");
+    var maxId = lastMaxDebugId;
+    var maxSeen = maxId || 0;
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].id > maxSeen) maxSeen = entries[i].id;
+    }
+    body.textContent = "";
     if (!entries.length) {
-      container.appendChild(
-        el("div", "meta", "No entries yet. Use a Check button or wait for the next Cron refresh.")
-      );
+      var empty = el("div", "debug-empty", "No traffic yet. Use a Check button or wait for the next Cron refresh.");
+      body.appendChild(empty);
+      lastMaxDebugId = maxSeen;
       return;
     }
-    entries.forEach(function (entry) {
-      var item = el("div", "debug-item");
-      var head = el("div", "debug-head");
+    var ascending = entries.slice().reverse();
+    ascending.forEach(function (entry) {
+      var isRequest = entry.direction === "request";
+      var row = el("div", "chat-row " + (isRequest ? "request" : "response"));
+      if (lastMaxDebugId !== null && entry.id > lastMaxDebugId) {
+        row.className += " fresh";
+      }
+      var bubble = el("div", "chat-bubble");
+      var head = el("div", "chat-bubble-head");
       head.appendChild(
         el(
           "span",
-          "chip " + (entry.direction === "request" ? "neutral" : "ok"),
-          entry.direction === "request" ? "REQ" : "RES"
+          "chip " + (isRequest ? "neutral" : entry.status && entry.status < 400 ? "ok" : "bad"),
+          isRequest ? "REQ" : "RES"
         )
       );
       var detail =
@@ -501,16 +552,128 @@ const DASHBOARD_HTML = `<!doctype html>
         (entry.durationMs !== null && entry.durationMs !== undefined
           ? " \\u00b7 " + entry.durationMs + " ms"
           : "");
-      head.appendChild(el("span", "mono debug-url", detail));
-      head.appendChild(el("span", "meta", new Date(entry.createdAt).toLocaleTimeString()));
-      item.appendChild(head);
-      var body = el("details", "debug-body");
-      body.appendChild(el("summary", null, "headers & body"));
-      if (entry.headers) body.appendChild(el("pre", "mono", entry.headers));
-      body.appendChild(el("pre", "mono", prettyJson(entry.body)));
-      item.appendChild(body);
-      container.appendChild(item);
+      head.appendChild(el("span", "mono", detail));
+      head.appendChild(
+        el("span", "chat-meta", new Date(entry.createdAt).toLocaleTimeString())
+      );
+      bubble.appendChild(head);
+      if (entry.headers) bubble.appendChild(el("pre", "mono", entry.headers));
+      bubble.appendChild(el("pre", "mono", prettyJson(entry.body)));
+      bubble.addEventListener("click", function () {
+        bubble.classList.toggle("open");
+      });
+      row.appendChild(bubble);
+      body.appendChild(row);
     });
+    lastMaxDebugId = maxSeen;
+    if (pinnedToBottom) body.scrollTop = body.scrollHeight;
+  }
+
+  document.getElementById("debug-entries").addEventListener("scroll", function (event) {
+    var body = event.target;
+    pinnedToBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+  });
+
+  document.getElementById("chat-fab").addEventListener("click", function () {
+    if (document.getElementById("chat-popup").hidden) openDebug();
+    else closeDebug();
+  });
+  document.getElementById("debug-close").addEventListener("click", closeDebug);
+  document.getElementById("debug-clear").addEventListener("click", function () {
+    fetch("/api/debug-log", { method: "DELETE" })
+      .then(function () {
+        lastMaxDebugId = null;
+        loadDebug();
+      })
+      .catch(function () {});
+  });
+
+  var searchTimer = null;
+  document.getElementById("search").addEventListener("input", function (event) {
+    var value = event.target.value;
+    if (searchTimer) clearTimeout(searchTimer);
+    searchTimer = setTimeout(function () {
+      search = value.trim().toLowerCase();
+      refresh();
+    }, 300);
+  });
+
+  document.getElementById("check-selected").addEventListener("click", checkSelected);
+  document.getElementById("select-all").addEventListener("change", function (event) {
+    var on = event.target.checked;
+    for (var i = 0; i < renderedIds.length; i++) {
+      toggleSelected(renderedIds[i], on);
+    }
+    var boxes = document.querySelectorAll("#rows .row-select");
+    for (var j = 0; j < boxes.length; j++) boxes[j].checked = on;
+    updateBulkButton();
+  });
+
+  document.getElementById("rows").addEventListener("change", function (event) {
+    var box = event.target;
+    if (box.tagName !== "INPUT" || !box.classList.contains("row-select")) return;
+    toggleSelected(box.getAttribute("data-device-id"), box.checked);
+    updateBulkButton();
+  });
+
+  function toggleSelected(id, on) {
+    var index = selectedIds.indexOf(id);
+    if (on && index === -1) selectedIds.push(id);
+    if (!on && index !== -1) selectedIds.splice(index, 1);
+  }
+
+  function updateBulkButton() {
+    var button = document.getElementById("check-selected");
+    button.disabled = selectedIds.length === 0;
+    button.textContent = selectedIds.length
+      ? "Check selected (" + selectedIds.length + ")"
+      : "Check selected";
+  }
+
+  var refreshStatusTimer = null;
+
+  function setRefreshStatus(text) {
+    document.getElementById("refresh-status").textContent = text;
+    if (refreshStatusTimer) clearTimeout(refreshStatusTimer);
+    refreshStatusTimer = setTimeout(function () {
+      document.getElementById("refresh-status").textContent = "";
+    }, 10000);
+  }
+
+  function checkSelected() {
+    if (!selectedIds.length) return;
+    var button = document.getElementById("check-selected");
+    button.disabled = true;
+    button.textContent = "Checking\\u2026";
+    fetch("/api/devices/refresh", {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ deviceIds: selectedIds })
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error("bulk refresh failed (" + r.status + ")");
+        return r.json();
+      })
+      .then(function (payload) {
+        var message =
+          "Refreshed " + (payload.devices || []).length + " device(s)";
+        if (payload.notFound && payload.notFound.length) {
+          message += " \\u00b7 " + payload.notFound.length + " not found";
+        }
+        if (payload.endpointNotFound && payload.endpointNotFound.length) {
+          message += " \\u00b7 " + payload.endpointNotFound.length + " endpoint missing";
+        }
+        setRefreshStatus(message);
+        selectedIds = [];
+        refresh();
+      })
+      .catch(function (err) {
+        setRefreshStatus("Error: " + String(err && err.message ? err.message : err));
+      })
+      .then(updateBulkButton);
   }
 
   function refresh() {
@@ -529,9 +692,9 @@ const DASHBOARD_HTML = `<!doctype html>
       })
       .then(function (o) {
         renderOverview(o);
-        return fetch("/api/devices?status=" + status + "&limit=" + limit, {
-          headers: { accept: "application/json" }
-        });
+        var url = "/api/devices?status=" + status + "&limit=" + limit;
+        if (search) url += "&search=" + encodeURIComponent(search);
+        return fetch(url, { headers: { accept: "application/json" } });
       })
       .then(function (r) {
         if (!r.ok) throw new Error("devices request failed (" + r.status + ")");
@@ -559,14 +722,6 @@ const DASHBOARD_HTML = `<!doctype html>
   document.getElementById("save-config").addEventListener("click", saveConfig);
   document.getElementById("sync-now").addEventListener("click", syncNow);
   document.getElementById("account-select").addEventListener("change", fillListOptions);
-  document.getElementById("open-debug").addEventListener("click", openDebug);
-  document.getElementById("debug-close").addEventListener("click", closeDebug);
-  document.getElementById("debug-refresh").addEventListener("click", loadDebug);
-  document.getElementById("debug-clear").addEventListener("click", function () {
-    fetch("/api/debug-log", { method: "DELETE" })
-      .then(loadDebug)
-      .catch(function () {});
-  });
 
   document.getElementById("rows").addEventListener("click", function (event) {
     var button = event.target;
@@ -587,12 +742,17 @@ const DASHBOARD_HTML = `<!doctype html>
         return r.json();
       })
       .then(function (payload) {
-        if (payload.device) {
-          var tr = button.closest("tr");
-          var fresh = renderDeviceRow(payload.device);
-          fresh.classList.add("flash");
-          if (tr && tr.parentNode) tr.parentNode.replaceChild(fresh, tr);
+        var device = payload.devices && payload.devices[0];
+        if (!device) {
+          if (payload.endpointNotFound && payload.endpointNotFound.length) {
+            throw new Error("Cortex endpoint not found");
+          }
+          throw new Error("device not found");
         }
+        var tr = button.closest("tr");
+        var fresh = renderDeviceRow(device);
+        fresh.classList.add("flash");
+        if (tr && tr.parentNode) tr.parentNode.replaceChild(fresh, tr);
       })
       .catch(function (err) {
         button.disabled = false;

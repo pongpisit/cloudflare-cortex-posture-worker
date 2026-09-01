@@ -17,7 +17,7 @@ import {
   getDashboardIntegrations,
   getDeviceComplianceByDeviceId,
   getDeviceCounts,
-  getDeviceMappingByDeviceId,
+  getDeviceMappingsByDeviceIds,
   getSerialComplianceDecisions,
   getStoredEvaluations,
   invalidateDeviceMappings,
@@ -36,7 +36,7 @@ import {
   saveEndpointSnapshots,
   updateVerifiedDeviceSerials,
 } from "./repository";
-import type { AppSettings } from "./repository";
+import type { AppSettings, DeviceCompliance } from "./repository";
 import type {
   CloudflareDevice,
   CortexEndpoint,
@@ -677,12 +677,15 @@ async function getApiDevices(url: URL, env: Env): Promise<Response> {
     }
     limit = parsed;
   }
+  const searchRaw = url.searchParams.get("search");
+  const search = searchRaw ? searchRaw.trim().toLowerCase().slice(0, 100) : "";
   const settings = await getAppSettings(env.DB);
   const devices = await listDeviceCompliance(
     env.DB,
     settings.maxContentAgeDays * 86_400_000,
     statusParam,
     limit,
+    search || undefined,
   );
   return json({
     generated_at: Date.now(),
@@ -733,37 +736,87 @@ async function postApiDeviceRefresh(
   env: Env,
 ): Promise<Response> {
   const body = await readRequestJson(request, 16 * 1024);
-  if (!isRecord(body) || typeof body.deviceId !== "string" || !body.deviceId.trim()) {
+  if (!isRecord(body)) throw new ClientError(400, "device_id_required");
+  let deviceIds: string[];
+  if (typeof body.deviceId === "string" && body.deviceId.trim()) {
+    deviceIds = [body.deviceId.trim()];
+  } else if (Array.isArray(body.deviceIds)) {
+    deviceIds = [
+      ...new Set(
+        body.deviceIds
+          .filter(
+            (value): value is string =>
+              typeof value === "string" && value.trim().length > 0,
+          )
+          .map((value) => value.trim()),
+      ),
+    ];
+    if (deviceIds.length === 0) throw new ClientError(400, "device_ids_required");
+    if (deviceIds.length > 100) {
+      throw new ClientError(400, "maximum_100_devices");
+    }
+  } else {
     throw new ClientError(400, "device_id_required");
   }
-  const deviceId = body.deviceId.trim();
-  const mapping = await getDeviceMappingByDeviceId(env.DB, deviceId);
-  if (!mapping) throw new ClientError(404, "device_not_found");
 
-  const runtimeEnv = requireRuntimeEnv(env);
-  let endpoints;
-  try {
-    endpoints = await getEndpointsByIds([mapping.cortexEndpointId], runtimeEnv);
-  } catch (error) {
-    await recordCortexError(env.DB, errorMessage(error), Date.now()).catch(
-      () => {},
-    );
-    throw error;
+  const mappings = await getDeviceMappingsByDeviceIds(env.DB, deviceIds);
+  const mappingByDevice = new Map(
+    mappings.map((mapping) => [
+      mapping.cloudflareDeviceId,
+      mapping.cortexEndpointId,
+    ]),
+  );
+  const notFound = deviceIds.filter((id) => !mappingByDevice.has(id));
+  if (deviceIds.length === 1 && notFound.length === 1) {
+    throw new ClientError(404, "device_not_found");
   }
-  const endpoint = endpoints[0];
-  if (!endpoint) throw new ClientError(404, "cortex_endpoint_not_found");
 
-  const maxContentAgeDays = await currentMaxContentAgeDays(env.DB);
-  await persistEvaluatedEndpoints([endpoint], runtimeEnv, maxContentAgeDays);
-  await recordCortexSuccess(env.DB, Date.now()).catch(() => {});
+  const endpointIds = [
+    ...new Set(mappings.map((mapping) => mapping.cortexEndpointId)),
+  ];
+  const refreshedDeviceIds: string[] = [];
+  const endpointNotFound: string[] = [];
+  let endpoints: CortexEndpoint[] = [];
+  if (endpointIds.length > 0) {
+    const runtimeEnv = requireRuntimeEnv(env);
+    try {
+      endpoints = await getEndpointsByIds(endpointIds, runtimeEnv);
+    } catch (error) {
+      await recordCortexError(env.DB, errorMessage(error), Date.now()).catch(
+        () => {},
+      );
+      throw error;
+    }
+    const returnedEndpointIds = new Set(
+      endpoints.map((endpoint) => endpoint.endpoint_id),
+    );
+    for (const [deviceId, endpointId] of mappingByDevice) {
+      if (returnedEndpointIds.has(endpointId)) refreshedDeviceIds.push(deviceId);
+      else endpointNotFound.push(deviceId);
+    }
+    if (endpoints.length > 0) {
+      const maxContentAgeDays = await currentMaxContentAgeDays(env.DB);
+      await persistEvaluatedEndpoints(
+        endpoints,
+        runtimeEnv,
+        maxContentAgeDays,
+      );
+      await recordCortexSuccess(env.DB, Date.now()).catch(() => {});
+    }
+  }
 
   const settings = await getAppSettings(env.DB);
-  const device = await getDeviceComplianceByDeviceId(
-    env.DB,
-    deviceId,
-    settings.maxContentAgeDays * 86_400_000,
-  );
-  return json({ device });
+  const maximumContentAge = settings.maxContentAgeDays * 86_400_000;
+  const devices: DeviceCompliance[] = [];
+  for (const deviceId of refreshedDeviceIds) {
+    const device = await getDeviceComplianceByDeviceId(
+      env.DB,
+      deviceId,
+      maximumContentAge,
+    );
+    if (device) devices.push(device);
+  }
+  return json({ devices, notFound, endpointNotFound });
 }
 
 async function postApiSync(env: Env): Promise<Response> {

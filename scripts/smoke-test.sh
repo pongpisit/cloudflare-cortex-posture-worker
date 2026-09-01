@@ -45,6 +45,8 @@ expect "api devices (all)" 200 \
   "$(status "${BASE_URL}/api/devices?status=all&limit=10" "${auth[@]}")"
 expect "api devices (noncompliant)" 200 \
   "$(status "${BASE_URL}/api/devices?status=noncompliant" "${auth[@]}")"
+expect "api devices (search)" 200 \
+  "$(status "${BASE_URL}/api/devices?search=desktop&limit=10" "${auth[@]}")"
 expect "api debug log" 200 "$(status "${BASE_URL}/api/debug-log" "${auth[@]}")"
 expect "refresh unknown device rejected" 404 \
   "$(status -X POST -H 'content-type: application/json' -d '{"deviceId":"does-not-exist"}' "${BASE_URL}/api/devices/refresh" "${auth[@]}")"
