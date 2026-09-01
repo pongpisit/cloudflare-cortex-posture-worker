@@ -554,6 +554,13 @@ handled:
   degraded when their APIs fail. Rotate the three secrets, recreate the
   service provider integration, and verify all pills return healthy. Check
   expiry dates at least twice a year.
+- **The Provider pill also reports quiet fleets.** Cloudflare only polls
+  `/check` while there are enrolled, online devices to evaluate. When every
+  device is powered off or disconnected from the Cloudflare One Client, polls
+  stop and the pill degrades even though the integration is healthy. In
+  **Zero Trust > Team & Resources > Devices**, compare each device's
+  `last_seen` with the Provider pill's timestamp before treating a stale pill
+  as an outage.
 - **Departed devices are cleaned up automatically.** Each `/check` poll
   touches a `last_seen_at` value per device (at most one write per device
   per day), and a daily job deletes mappings unseen for
