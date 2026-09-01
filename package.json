@@ -5,16 +5,45 @@
   "type": "module",
   "scripts": {
     "check": "npm run types && npm run typecheck && npm run lint && npm test && npm run deploy:dry",
-    "deploy": "wrangler deploy",
+    "deploy": "npm run migrate:remote && wrangler deploy",
     "deploy:dry": "wrangler deploy --dry-run",
     "dev": "wrangler dev --test-scheduled",
     "lint": "oxlint --deny-warnings src test",
-    "migrate:local": "wrangler d1 migrations apply cortex-posture --local",
-    "migrate:remote": "wrangler d1 migrations apply cortex-posture --remote",
+    "migrate:local": "wrangler d1 migrations apply DB --local",
+    "migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "smoke": "bash scripts/smoke-test.sh",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "types": "wrangler types",
     "tail": "wrangler tail"
+  },
+  "cloudflare": {
+    "bindings": {
+      "CLOUDFLARE_ACCOUNT_ID": {
+        "description": "Your Cloudflare account ID."
+      },
+      "ACCESS_TEAM_DOMAIN": {
+        "description": "Your Zero Trust team domain, e.g. `https://myteam.cloudflareaccess.com`."
+      },
+      "ACCESS_AUD": {
+        "description": "AUD of the Access application protecting this Worker."
+      },
+      "CORTEX_BASE_URL": {
+        "description": "Cortex XDR API HTTPS origin. See the README's Cortex Configuration section."
+      },
+      "CORTEX_API_KEY": {
+        "description": "Cortex XDR API key with endpoint-read access. See the README's Cortex Configuration section."
+      },
+      "CORTEX_API_KEY_ID": {
+        "description": "Cortex XDR API key ID from the API Keys page."
+      },
+      "CLOUDFLARE_API_TOKEN": {
+        "description": "Cloudflare API token scoped to the account with **Zero Trust Write**."
+      },
+      "CLOUDFLARE_SERIAL_LIST_ID": {
+        "description": "ID of the Zero Trust SERIAL list this Worker manages."
+      }
+    }
   },
   "dependencies": {
     "jose": "^6.2.10"

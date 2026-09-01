@@ -2,7 +2,6 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "cloudflare-cortex-posture-worker",
   "main": "src/index.ts",
-  "account_id": "aa8ab6fe5b7f906df426a972033e922a",
   "compatibility_date": "2026-08-26",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,

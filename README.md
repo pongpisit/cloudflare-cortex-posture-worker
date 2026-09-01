@@ -10,10 +10,13 @@ fail open until a later discovery and refresh cycle.
 
 The stale-content threshold is configured with `MAX_CONTENT_AGE_DAYS`. The
 default is seven days; set it to `14` if the desired grace period is two weeks.
-No administrative frontend is required.
+A read-only operations dashboard is included for observability.
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/pongpisit/cloudflare-cortex-posture-worker)
 
 ## Contents
 
+- [Deploy to Cloudflare](#deploy-to-cloudflare)
 - [Architecture](#architecture)
 - [Behavior](#behavior)
 - [Prerequisites](#prerequisites)
@@ -24,8 +27,30 @@ No administrative frontend is required.
 - [Policy Setup](#policy-setup)
 - [Validation](#validation)
 - [Operations](#operations)
+- [Dashboard](#dashboard)
+- [Smoke Testing](#smoke-testing)
 - [Failure Model](#failure-model)
 - [Reference](#reference)
+
+## Deploy to Cloudflare
+
+The button above clones this repository into your account, provisions the D1
+database and refresh queues, applies migrations, and deploys the Worker through
+[Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/).
+
+The deployment is intentionally inert until the remaining setup is completed:
+
+1. Update the vars in `wrangler.jsonc`: `CLOUDFLARE_ACCOUNT_ID`,
+   `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `CORTEX_BASE_URL`, and
+   `CLOUDFLARE_SERIAL_LIST_ID`.
+2. Set the secrets (`CORTEX_API_KEY`, `CORTEX_API_KEY_ID`,
+   `CLOUDFLARE_API_TOKEN`) in the Worker or via `.dev.vars` locally.
+3. Follow [Custom Provider Setup](#custom-provider-setup) and
+   [Serial List Setup](#serial-list-setup) in the Zero Trust dashboard.
+4. Run the [smoke test](#smoke-testing) and the [validation](#validation)
+   checklist before enabling `CLOUDFLARE_LIST_SYNC_ENABLED`.
+
+The repository must be public for others to use the button.
 
 ## Architecture
 
@@ -180,6 +205,10 @@ in `wrangler.jsonc` or Git.
 ```bash
 npm run deploy
 ```
+
+`npm run deploy` applies pending D1 migrations before uploading the Worker.
+Wrangler resolves the target account from your `wrangler login` session; pass
+`--account-id` if your login has access to multiple accounts.
 
 Add a production [Workers Custom Domain](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/),
 such as `cortex-posture.example.com`, for the custom provider endpoint.
@@ -358,6 +387,32 @@ dashboard in a browser, add an Include rule to the Worker Access application
 for your administrator emails (or Identity Provider group) alongside the
 existing service-token rule. Do not remove the service-token rule, and keep the
 serial-denylist Block policy away from this application.
+
+## Smoke Testing
+
+`npm run smoke` curls every Access-protected endpoint with the custom
+provider's service token and reports the HTTP status of each:
+
+```bash
+BASE_URL="https://cortex-posture.example.com" \
+CF_ACCESS_CLIENT_ID="<service-token-client-id>" \
+CF_ACCESS_CLIENT_SECRET="<service-token-client-secret>" \
+npm run smoke
+```
+
+A single equivalent request:
+
+```bash
+curl -s "https://cortex-posture.example.com/api/overview" \
+  -H "CF-Access-Client-Id: <service-token-client-id>" \
+  -H "CF-Access-Client-Secret: <service-token-client-secret>"
+```
+
+Cloudflare Access exchanges the service-token headers for a
+`CF-Access-Jwt-Assertion` header at the edge, which is the only credential the
+Worker itself accepts. The script also verifies that requests without Access
+credentials are rejected, and that invalid query parameters fail with `400`
+rather than being ignored.
 
 ## Failure Model
 
