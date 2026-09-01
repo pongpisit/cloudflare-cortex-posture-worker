@@ -73,8 +73,9 @@ flowchart LR
 The integration has three asynchronous stages:
 
 1. The Cloudflare custom service provider sends device inventory to `/check`.
-2. The Worker maps an unknown device to exactly one Cortex endpoint using
-   normalized hostname plus a matching MAC address.
+2. The Worker maps an unknown device to exactly one Cortex endpoint using the
+   normalized hostname. When several Cortex endpoints share that hostname, a
+   matching MAC address disambiguates them.
 3. Cron refreshes known Cortex endpoints in batches and replaces the Zero Trust
    serial list with mapped devices whose `last_content_update_time` is older
    than the configured content-age threshold.
@@ -136,7 +137,7 @@ The Worker consumes:
 | --- | --- |
 | `endpoint_id` | Stable mapping target |
 | `endpoint_name` | Hostname verification |
-| `mac_address[]` | MAC verification |
+| `mac_address[]` | MAC disambiguation for duplicate hostnames |
 | `last_content_update_time` | Sole noncompliance condition |
 
 ### Test the Cortex API
@@ -470,9 +471,10 @@ denylist:
 A stale device already in the list remains blocked during an outage. A newly
 stale device is allowed until Cortex refresh and list synchronization succeed.
 
-Hostname plus MAC is required for Cortex mapping even though policy enforcement
-uses the hardware serial. Hostname-only matches are rejected, and ambiguous
-matches remain unmapped.
+Cortex mapping uses the normalized hostname even though policy enforcement
+uses the hardware serial. When several Cortex endpoints share a hostname, a
+matching MAC address is required to disambiguate; collisions the MAC cannot
+resolve remain unmapped.
 
 ## Reference
 

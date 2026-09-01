@@ -8,7 +8,7 @@
   "vars": {
     "ACCESS_TEAM_DOMAIN": "https://replace-me.cloudflareaccess.com",
     "ACCESS_AUD": "replace-with-access-application-aud",
-    "CORTEX_BASE_URL": "https://replace-with-cortex-api-fqdn"
+    "CORTEX_BASE_URL": "https://replace-me.example.invalid"
   },
   "d1_databases": [
     {

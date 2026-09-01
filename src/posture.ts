@@ -36,21 +36,25 @@ export function findCortexEndpoint(
   endpoints: CortexEndpoint[],
 ): CortexEndpoint | null {
   const hostname = normalizeHostname(device.hostname);
+  if (!hostname) return null;
+
+  const byHostname = endpoints.filter(
+    (endpoint) =>
+      normalizeHostname(endpoint.endpoint_name ?? endpoint.host_name) ===
+      hostname,
+  );
+  if (byHostname.length === 0) return null;
+  if (byHostname.length === 1) return byHostname[0] ?? null;
+
+  // Several endpoints share the hostname: disambiguate with the MAC address.
   const deviceMacs = normalizeMacCollection(device.mac_address);
-  if (!hostname || deviceMacs.size === 0) return null;
-
-  const matches = endpoints.filter((endpoint) => {
-    const endpointHostname = normalizeHostname(
-      endpoint.endpoint_name ?? endpoint.host_name,
-    );
-    if (endpointHostname !== hostname) return false;
-
+  if (deviceMacs.size === 0) return null;
+  const byMac = byHostname.filter((endpoint) => {
     const endpointMacs = normalizeMacCollection(endpoint.mac_address);
     return [...deviceMacs].some((mac) => endpointMacs.has(mac));
   });
-
-  if (matches.length !== 1) return null;
-  return matches[0] ?? null;
+  if (byMac.length !== 1) return null;
+  return byMac[0] ?? null;
 }
 
 export function normalizeHostname(value: unknown): string {

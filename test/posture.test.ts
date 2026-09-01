@@ -42,21 +42,57 @@ describe("device normalization", () => {
 });
 
 describe("Cortex matching", () => {
-  it("requires hostname and MAC", () => {
+  it("matches a unique hostname without requiring a MAC", () => {
     expect(findCortexEndpoint(device, [endpoint()])?.endpoint_id).toBe(
       "cortex-1",
     );
     expect(
-      findCortexEndpoint({ ...device, mac_address: undefined }, [endpoint()]),
+      findCortexEndpoint({ ...device, mac_address: undefined }, [endpoint()])
+        ?.endpoint_id,
+    ).toBe("cortex-1");
+    expect(
+      findCortexEndpoint({ ...device, mac_address: "aa:bb:cc:dd:ee:ff" }, [
+        endpoint(),
+      ])?.endpoint_id,
+    ).toBe("cortex-1");
+  });
+
+  it("returns null when no hostname matches", () => {
+    expect(
+      findCortexEndpoint(device, [endpoint({ endpoint_name: "other-host" })]),
+    ).toBeNull();
+    expect(
+      findCortexEndpoint({ ...device, hostname: undefined }, [endpoint()]),
     ).toBeNull();
   });
 
-  it("fails an ambiguous match", () => {
+  it("disambiguates duplicate hostnames with the MAC address", () => {
+    expect(
+      findCortexEndpoint(device, [
+        endpoint(),
+        endpoint({ endpoint_id: "cortex-2", mac_address: ["aa:bb:cc:dd:ee:ff"] }),
+      ])?.endpoint_id,
+    ).toBe("cortex-1");
+  });
+
+  it("fails a duplicate hostname when the MAC cannot disambiguate", () => {
     expect(
       findCortexEndpoint(device, [
         endpoint(),
         endpoint({ endpoint_id: "cortex-2" }),
       ]),
+    ).toBeNull();
+    expect(
+      findCortexEndpoint(
+        { ...device, mac_address: undefined },
+        [endpoint(), endpoint({ endpoint_id: "cortex-2" })],
+      ),
+    ).toBeNull();
+    expect(
+      findCortexEndpoint(
+        { ...device, mac_address: "aa:bb:cc:dd:ee:ff" },
+        [endpoint(), endpoint({ endpoint_id: "cortex-2" })],
+      ),
     ).toBeNull();
   });
 });

@@ -124,12 +124,13 @@ export default {
           continue;
         }
 
-        const currentMacs = normalizeDeviceMacs(device.mac_address);
         const currentSerial = device.serial_number?.trim() || null;
         const storedSerial = stored.serialNumber?.trim() || null;
+        // Hostname is the mapping identity; MAC only disambiguates duplicate
+        // hostnames at discovery time, so a NIC change does not invalidate a
+        // stored mapping.
         const identityChanged =
           normalizeHostname(device.hostname) !== stored.hostname ||
-          !currentMacs.has(stored.verifiedMac) ||
           Boolean(
             storedSerial && currentSerial && storedSerial !== currentSerial,
           );
@@ -830,15 +831,6 @@ function optionalString(value: unknown, maximum: number): string | undefined {
     throw new ClientError(400, "invalid_device_field");
   }
   return value;
-}
-
-function normalizeDeviceMacs(value: unknown): Set<string> {
-  const values = Array.isArray(value) ? value : [value];
-  return new Set(
-    values
-      .map((item) => String(item ?? "").toLowerCase().replace(/[^0-9a-f]/g, ""))
-      .filter((item) => item.length === 12),
-  );
 }
 
 function requireRuntimeEnv(env: Env): RuntimeEnv {
