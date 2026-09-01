@@ -56,7 +56,7 @@ const DASHBOARD_HTML = `<!doctype html>
   @keyframes rowflash { 0% { background: #fff3cd; } 100% { background: transparent; } }
   .chat-fab { position: fixed; right: 20px; bottom: 20px; z-index: 60; background: #1c2733; color: #fff; padding: 10px 18px; border-radius: 999px; font-size: 13px; cursor: pointer; box-shadow: 0 6px 18px rgba(28,39,51,.35); user-select: none; }
   .chat-fab:hover { background: #2c3e52; }
-  .chat-popup { position: fixed; right: 20px; bottom: 70px; z-index: 61; width: min(440px, calc(100vw - 40px)); max-height: 62vh; background: #fff; border: 1px solid #e2e8ee; border-radius: 14px; box-shadow: 0 12px 32px rgba(28,39,51,.28); display: flex; flex-direction: column; overflow: hidden; animation: popup-in .18s ease-out; }
+  .chat-popup { position: fixed; right: 20px; bottom: 70px; z-index: 61; width: min(520px, calc(100vw - 40px)); max-height: 62vh; background: #fff; border: 1px solid #e2e8ee; border-radius: 14px; box-shadow: 0 12px 32px rgba(28,39,51,.28); display: flex; flex-direction: column; overflow: hidden; animation: popup-in .18s ease-out; }
   .chat-popup[hidden] { display: none; }
   @keyframes popup-in { 0% { transform: translateY(10px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
   .chat-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid #e2e8ee; background: #fafbfc; }
@@ -75,12 +75,11 @@ const DASHBOARD_HTML = `<!doctype html>
   .chat-row.fresh .chat-bubble { animation: bubble-in .25s ease-out; }
   @keyframes bubble-in { 0% { transform: translateY(8px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
   .chat-bubble .chip { margin-right: 6px; }
-  .chat-bubble-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; cursor: pointer; }
+  .chat-bubble-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .chat-row.request .chat-bubble-head { color: #fff; }
   .chat-meta { opacity: .75; font-size: 11px; }
-  .chat-bubble pre { display: none; background: rgba(255,255,255,.9); color: #1c2733; border-radius: 8px; padding: 8px 10px; overflow: auto; max-height: 220px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; font-size: 11px; }
+  .chat-bubble pre { background: rgba(255,255,255,.9); color: #1c2733; border-radius: 8px; padding: 8px 10px; overflow: auto; max-height: 220px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; font-size: 11px; }
   .chat-row.request .chat-bubble pre { background: rgba(255,255,255,.12); color: #e8edf3; }
-  .chat-bubble.open pre { display: block; }
   .debug-empty { color: #5b6b7b; font-size: 12px; text-align: center; padding: 14px 0; }
   .config { background: #fff; border: 1px solid #e2e8ee; border-radius: 10px; padding: 16px; margin-bottom: 20px; }
   .config-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
@@ -559,9 +558,6 @@ const DASHBOARD_HTML = `<!doctype html>
       bubble.appendChild(head);
       if (entry.headers) bubble.appendChild(el("pre", "mono", entry.headers));
       bubble.appendChild(el("pre", "mono", prettyJson(entry.body)));
-      bubble.addEventListener("click", function () {
-        bubble.classList.toggle("open");
-      });
       row.appendChild(bubble);
       body.appendChild(row);
     });
