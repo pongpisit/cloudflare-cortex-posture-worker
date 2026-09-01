@@ -405,6 +405,16 @@ applied on the next Cron run without a redeploy:
   and 5,000 on Enterprise).
 - **Enable list synchronization** is the master switch for list updates. It
   stays disabled until you turn it on.
+- **Sync now** runs the list synchronization immediately instead of waiting
+  for the next Cron cycle.
+
+Each device row has a **Check** button that refreshes that single device from
+Cortex on demand and updates the row with the result.
+
+The **Debug log** panel shows the most recent Cortex requests and responses —
+method, URL, status, duration, headers (authorization redacted), and bodies.
+It is controlled by the **Log Cortex traffic** setting and retains the last
+200 entries in D1.
 
 JSON backing endpoints:
 
@@ -412,8 +422,12 @@ JSON backing endpoints:
 | --- | --- |
 | `GET /api/overview` | Integration statuses, device counts, noncompliant serial count, sync state |
 | `GET /api/devices?status=all\|noncompliant\|compliant&limit=N` | Per-device compliance rows, `limit` 1–500, default 200 |
+| `POST /api/devices/refresh` | Refresh one device from Cortex immediately (`{"deviceId": "..."}`) |
+| `POST /api/sync` | Run the list synchronization immediately |
+| `GET /api/debug-log?limit=N` | Recent Cortex request/response pairs, `limit` 1–200, default 50 |
+| `DELETE /api/debug-log` | Clear the debug log |
 | `GET /api/settings` | Current operational settings and readiness flags |
-| `PUT /api/settings` | Update settings: `cloudflareAccountId`, `serialListId`, `serialListName`, `listSyncEnabled`, `maxContentAgeDays` (1–365), `listMaxItems` (1–100000) |
+| `PUT /api/settings` | Update settings: `cloudflareAccountId`, `serialListId`, `serialListName`, `listSyncEnabled`, `maxContentAgeDays` (1–365), `listMaxItems` (1–100000), `debugLogEnabled` |
 | `GET /api/cloudflare/lists` | Accounts and `SERIAL` lists visible to the API token |
 
 Settings can also be updated directly:
@@ -519,6 +533,7 @@ Dashboard-managed settings (stored in D1, with defaults):
 | Content age threshold | `7` days | Stale-content boundary; use `14` for two weeks |
 | List capacity | `1000` | Safety limit; `5000` on Enterprise entitlements |
 | List synchronization | disabled | Master switch for list updates |
+| Cortex traffic logging | enabled | Store recent Cortex request/response pairs for the debug panel |
 
 Advanced overrides (set as Worker dashboard variables only when needed):
 `SNAPSHOT_REFRESH_MINUTES` (`5`), `CORTEX_TIMEOUT_MS` (`15000`),

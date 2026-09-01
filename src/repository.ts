@@ -573,6 +573,7 @@ export interface AppSettings {
   listSyncEnabled: boolean;
   maxContentAgeDays: number;
   listMaxItems: number;
+  debugLogEnabled: boolean;
 }
 
 interface AppSettingRow {
@@ -587,6 +588,7 @@ const APP_SETTING_KEYS = [
   "list_sync_enabled",
   "max_content_age_days",
   "list_max_items",
+  "debug_log_enabled",
 ] as const;
 
 export async function getAppSettings(db: D1Database): Promise<AppSettings> {
@@ -610,6 +612,7 @@ export async function getAppSettings(db: D1Database): Promise<AppSettings> {
       7,
     ),
     listMaxItems: settingInt(values.get("list_max_items"), 1, 100_000, 1000),
+    debugLogEnabled: values.get("debug_log_enabled") !== "false",
   };
 }
 
@@ -862,4 +865,144 @@ function isRowNoncompliant(
     (row.last_content_update_time ?? 0) <
       (row.cortex_refreshed_at ?? 0) - maximumContentAge
   );
+}
+
+export async function getDeviceMappingByDeviceId(
+  db: D1Database,
+  deviceId: string,
+): Promise<{ cortexEndpointId: string } | null> {
+  const row = await db
+    .prepare(
+      `SELECT cortex_endpoint_id FROM device_mappings
+       WHERE cloudflare_device_id = ? LIMIT 1`,
+    )
+    .bind(deviceId)
+    .first<{ cortex_endpoint_id: string }>();
+  return row ? { cortexEndpointId: row.cortex_endpoint_id } : null;
+}
+
+export async function getDeviceComplianceByDeviceId(
+  db: D1Database,
+  deviceId: string,
+  maximumContentAge: number,
+): Promise<DeviceCompliance | null> {
+  const result = await db
+    .prepare(
+      `SELECT m.cloudflare_device_id,
+              TRIM(m.serial_number) AS serial_number,
+              m.hostname,
+              m.verified_mac,
+              m.status AS mapping_status,
+              s.score,
+              s.reason,
+              s.last_content_update_time,
+              s.cortex_refreshed_at
+       FROM device_mappings m
+       LEFT JOIN endpoint_snapshots s
+         ON s.cortex_endpoint_id = m.cortex_endpoint_id
+       WHERE m.cloudflare_device_id = ?
+       LIMIT 1`,
+    )
+    .bind(deviceId)
+    .all<DeviceComplianceRow>();
+  const row = result.results[0];
+  if (!row) return null;
+  return {
+    cloudflareDeviceId: row.cloudflare_device_id,
+    serialNumber: row.serial_number,
+    hostname: row.hostname,
+    verifiedMac: row.verified_mac,
+    mappingStatus: row.mapping_status,
+    score: row.score,
+    reason: row.reason,
+    lastContentUpdateTime: row.last_content_update_time,
+    cortexRefreshedAt: row.cortex_refreshed_at,
+    noncompliant: isRowNoncompliant(row, maximumContentAge),
+  };
+}
+
+export interface DebugLogEntry {
+  id: number;
+  createdAt: number;
+  source: string;
+  direction: string;
+  method: string | null;
+  url: string;
+  status: number | null;
+  headers: string | null;
+  body: string | null;
+  durationMs: number | null;
+}
+
+interface DebugLogRow {
+  id: number;
+  created_at: number;
+  source: string;
+  direction: string;
+  method: string | null;
+  url: string;
+  status: number | null;
+  headers: string | null;
+  body: string | null;
+  duration_ms: number | null;
+}
+
+const DEBUG_LOG_RETENTION = 200;
+
+export async function appendDebugLog(
+  db: D1Database,
+  entry: Omit<DebugLogEntry, "id">,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO debug_log(
+         created_at, source, direction, method, url, status, headers, body, duration_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      entry.createdAt,
+      entry.source,
+      entry.direction,
+      entry.method ?? null,
+      entry.url,
+      entry.status ?? null,
+      entry.headers ?? null,
+      entry.body ?? null,
+      entry.durationMs ?? null,
+    )
+    .run();
+  await db
+    .prepare(
+      `DELETE FROM debug_log WHERE id <= (
+         SELECT id FROM debug_log ORDER BY id DESC LIMIT 1 OFFSET ?
+       )`,
+    )
+    .bind(DEBUG_LOG_RETENTION)
+    .run();
+}
+
+export async function listDebugLog(
+  db: D1Database,
+  limit: number,
+): Promise<DebugLogEntry[]> {
+  const result = await db
+    .prepare(`SELECT * FROM debug_log ORDER BY id DESC LIMIT ?`)
+    .bind(limit)
+    .all<DebugLogRow>();
+  return result.results.map((row) => ({
+    id: row.id,
+    createdAt: row.created_at,
+    source: row.source,
+    direction: row.direction,
+    method: row.method,
+    url: row.url,
+    status: row.status,
+    headers: row.headers,
+    body: row.body,
+    durationMs: row.duration_ms,
+  }));
+}
+
+export async function clearDebugLog(db: D1Database): Promise<void> {
+  await db.prepare(`DELETE FROM debug_log`).run();
 }

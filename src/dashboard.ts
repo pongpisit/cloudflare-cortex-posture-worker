@@ -46,6 +46,25 @@ const DASHBOARD_HTML = `<!doctype html>
   .chip.neutral { background: #eef2f6; color: #5b6b7b; }
   .error { background: #fdecea; border: 1px solid #f5b7b1; color: #922b21; border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; display: none; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .row-check { border: 1px solid #cbd6e0; background: #fff; padding: 2px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; color: #1c2733; }
+  .row-check:disabled { opacity: .5; cursor: default; }
+  .toolbar-right { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  tr.flash td { animation: rowflash 1.6s ease-out; }
+  @keyframes rowflash { 0% { background: #fff3cd; } 100% { background: transparent; } }
+  .overlay { position: fixed; inset: 0; background: rgba(28,39,51,.45); display: flex; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
+  .overlay[hidden] { display: none; }
+  .overlay-panel { background: #fff; border-radius: 12px; width: min(880px, 100%); max-height: 85vh; display: flex; flex-direction: column; overflow: hidden; }
+  .overlay-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid #e2e8ee; }
+  .overlay-head .label { font-size: 12px; color: #5b6b7b; text-transform: uppercase; letter-spacing: .04em; }
+  .overlay-actions { display: flex; gap: 8px; }
+  .overlay-actions button { border: 1px solid #cbd6e0; background: #fff; padding: 6px 14px; border-radius: 8px; font-size: 13px; cursor: pointer; color: #1c2733; }
+  .overlay-actions button.primary { background: #1c2733; color: #fff; border-color: #1c2733; }
+  .overlay-body { overflow: auto; padding: 12px 18px 18px; }
+  .debug-item { border: 1px solid #e2e8ee; border-radius: 8px; padding: 8px 12px; margin-bottom: 8px; }
+  .debug-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .debug-url { font-size: 12px; word-break: break-all; }
+  .debug-body summary { cursor: pointer; font-size: 12px; color: #5b6b7b; margin: 6px 0; }
+  .debug-body pre { background: #fafbfc; border: 1px solid #eef2f6; border-radius: 6px; padding: 8px 10px; overflow: auto; max-height: 240px; margin: 4px 0; white-space: pre-wrap; word-break: break-all; }
   .config { background: #fff; border: 1px solid #e2e8ee; border-radius: 10px; padding: 16px; margin-bottom: 20px; }
   .config-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
   .config-head .label { font-size: 12px; color: #5b6b7b; text-transform: uppercase; letter-spacing: .04em; }
@@ -92,8 +111,12 @@ const DASHBOARD_HTML = `<!doctype html>
       <div class="config-field">
         <label><input id="sync-enabled" type="checkbox"> Enable list synchronization</label>
       </div>
+      <div class="config-field">
+        <label><input id="debug-log-enabled" type="checkbox"> Log Cortex traffic</label>
+      </div>
       <div class="config-actions">
         <button type="button" id="load-lists">Load lists</button>
+        <button type="button" id="sync-now">Sync now</button>
         <button type="button" id="save-config" class="primary">Save configuration</button>
       </div>
     </div>
@@ -105,19 +128,35 @@ const DASHBOARD_HTML = `<!doctype html>
       <button type="button" data-status="noncompliant">Noncompliant</button>
       <button type="button" data-status="compliant">Compliant</button>
     </div>
-    <div class="sub" id="count"></div>
+    <div class="toolbar-right">
+      <button type="button" id="open-debug" class="row-check">Debug log</button>
+      <div class="sub" id="count"></div>
+    </div>
   </div>
   <div class="tablewrap">
     <table>
       <thead>
         <tr>
-          <th>Hostname</th><th>Serial</th><th>MAC</th><th>Compliance</th>
+          <th></th><th>Hostname</th><th>Serial</th><th>MAC</th><th>Compliance</th>
           <th>Mapping</th><th>Score</th><th>Reason</th>
           <th>Content updated</th><th>Refreshed</th>
         </tr>
       </thead>
       <tbody id="rows"></tbody>
     </table>
+  </div>
+</div>
+<div class="overlay" id="debug-overlay" hidden>
+  <div class="overlay-panel">
+    <div class="overlay-head">
+      <span class="label">Cortex request log</span>
+      <div class="overlay-actions">
+        <button type="button" id="debug-refresh">Refresh</button>
+        <button type="button" id="debug-clear">Clear</button>
+        <button type="button" id="debug-close" class="primary">Close</button>
+      </div>
+    </div>
+    <div class="overlay-body" id="debug-entries"></div>
   </div>
 </div>
 <script>
@@ -193,27 +232,36 @@ const DASHBOARD_HTML = `<!doctype html>
       " days is noncompliant \\u00b7 updated " + new Date(o.generated_at).toLocaleString();
   }
 
+  function renderDeviceRow(row) {
+    var tr = document.createElement("tr");
+    function td(cls, text) {
+      var c = el("td", cls, text);
+      tr.appendChild(c);
+      return c;
+    }
+    var checkCell = td(null);
+    var button = el("button", "row-check", "Check");
+    button.type = "button";
+    button.setAttribute("data-device-id", row.cloudflareDeviceId);
+    checkCell.appendChild(button);
+    td(null, row.hostname || "");
+    td("mono", row.serialNumber || "");
+    td("mono", mac(row.verifiedMac));
+    var c = chip(row);
+    td(null).appendChild(el("span", "chip " + c[0], c[1]));
+    td(null, row.mappingStatus);
+    td(null, row.score === null || row.score === undefined ? "\\u2014" : String(row.score));
+    td(null, row.reason || "\\u2014");
+    td(null, rel(row.lastContentUpdateTime));
+    td(null, rel(row.cortexRefreshedAt));
+    return tr;
+  }
+
   function renderDevices(payload) {
     var tbody = document.getElementById("rows");
     tbody.textContent = "";
     (payload.devices || []).forEach(function (row) {
-      var tr = document.createElement("tr");
-      function td(cls, text) {
-        var c = el("td", cls, text);
-        tr.appendChild(c);
-        return c;
-      }
-      td(null, row.hostname || "");
-      td("mono", row.serialNumber || "");
-      td("mono", mac(row.verifiedMac));
-      var c = chip(row);
-      td(null).appendChild(el("span", "chip " + c[0], c[1]));
-      td(null, row.mappingStatus);
-      td(null, row.score === null || row.score === undefined ? "\\u2014" : String(row.score));
-      td(null, row.reason || "\\u2014");
-      td(null, rel(row.lastContentUpdateTime));
-      td(null, rel(row.cortexRefreshedAt));
-      tbody.appendChild(tr);
+      tbody.appendChild(renderDeviceRow(row));
     });
     document.getElementById("count").textContent =
       (payload.devices || []).length + " of max " + limit + " devices shown";
@@ -244,6 +292,7 @@ const DASHBOARD_HTML = `<!doctype html>
     document.getElementById("threshold").value = s.maxContentAgeDays;
     document.getElementById("capacity").value = s.listMaxItems;
     document.getElementById("sync-enabled").checked = !!s.listSyncEnabled;
+    document.getElementById("debug-log-enabled").checked = s.debugLogEnabled !== false;
 
     var flags = [];
     if (payload.auth_mode === "none") {
@@ -331,7 +380,8 @@ const DASHBOARD_HTML = `<!doctype html>
     var body = {
       maxContentAgeDays: parseInt(document.getElementById("threshold").value, 10),
       listMaxItems: parseInt(document.getElementById("capacity").value, 10),
-      listSyncEnabled: document.getElementById("sync-enabled").checked
+      listSyncEnabled: document.getElementById("sync-enabled").checked,
+      debugLogEnabled: document.getElementById("debug-log-enabled").checked
     };
     if (isNaN(body.maxContentAgeDays) || isNaN(body.listMaxItems)) {
       configMessage("Threshold and capacity must be numbers.");
@@ -365,6 +415,102 @@ const DASHBOARD_HTML = `<!doctype html>
       .catch(function (err) {
         configMessage("Error: " + String(err && err.message ? err.message : err));
       });
+  }
+
+  function syncNow() {
+    configMessage("Syncing\\u2026");
+    fetch("/api/sync", { method: "POST", headers: { accept: "application/json" } })
+      .then(function (r) {
+        if (!r.ok) throw new Error("sync failed (" + r.status + ")");
+        return r.json();
+      })
+      .then(function (payload) {
+        configMessage(
+          "Sync complete \\u00b7 changed=" + payload.changed + " \\u00b7 count=" + payload.count
+        );
+        refresh();
+      })
+      .catch(function (err) {
+        configMessage("Error: " + String(err && err.message ? err.message : err));
+      });
+  }
+
+  var debugTimer = null;
+
+  function openDebug() {
+    document.getElementById("debug-overlay").hidden = false;
+    loadDebug();
+    debugTimer = setInterval(loadDebug, 5000);
+  }
+
+  function closeDebug() {
+    document.getElementById("debug-overlay").hidden = true;
+    if (debugTimer) {
+      clearInterval(debugTimer);
+      debugTimer = null;
+    }
+  }
+
+  function loadDebug() {
+    fetch("/api/debug-log?limit=100", { headers: { accept: "application/json" } })
+      .then(function (r) {
+        if (!r.ok) throw new Error("debug log failed (" + r.status + ")");
+        return r.json();
+      })
+      .then(function (payload) {
+        renderDebug(payload.entries || []);
+      })
+      .catch(function () {});
+  }
+
+  function prettyJson(value) {
+    if (!value) return "";
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch (e) {
+      return value;
+    }
+  }
+
+  function shortUrl(url) {
+    return String(url || "").replace(/^https?:\\/\\/[^\\/]+/, "");
+  }
+
+  function renderDebug(entries) {
+    var container = document.getElementById("debug-entries");
+    container.textContent = "";
+    if (!entries.length) {
+      container.appendChild(
+        el("div", "meta", "No entries yet. Use a Check button or wait for the next Cron refresh.")
+      );
+      return;
+    }
+    entries.forEach(function (entry) {
+      var item = el("div", "debug-item");
+      var head = el("div", "debug-head");
+      head.appendChild(
+        el(
+          "span",
+          "chip " + (entry.direction === "request" ? "neutral" : "ok"),
+          entry.direction === "request" ? "REQ" : "RES"
+        )
+      );
+      var detail =
+        (entry.method || "POST") + " " + shortUrl(entry.url) +
+        (entry.status ? " \\u00b7 " + entry.status : "") +
+        (entry.durationMs !== null && entry.durationMs !== undefined
+          ? " \\u00b7 " + entry.durationMs + " ms"
+          : "");
+      head.appendChild(el("span", "mono debug-url", detail));
+      head.appendChild(el("span", "meta", new Date(entry.createdAt).toLocaleTimeString()));
+      item.appendChild(head);
+      var body = el("details", "debug-body");
+      body.appendChild(el("summary", null, "headers & body"));
+      if (entry.headers) body.appendChild(el("pre", "mono", entry.headers));
+      body.appendChild(el("pre", "mono", prettyJson(entry.body)));
+      item.appendChild(body);
+      container.appendChild(item);
+    });
   }
 
   function refresh() {
@@ -411,7 +557,49 @@ const DASHBOARD_HTML = `<!doctype html>
 
   document.getElementById("load-lists").addEventListener("click", loadLists);
   document.getElementById("save-config").addEventListener("click", saveConfig);
+  document.getElementById("sync-now").addEventListener("click", syncNow);
   document.getElementById("account-select").addEventListener("change", fillListOptions);
+  document.getElementById("open-debug").addEventListener("click", openDebug);
+  document.getElementById("debug-close").addEventListener("click", closeDebug);
+  document.getElementById("debug-refresh").addEventListener("click", loadDebug);
+  document.getElementById("debug-clear").addEventListener("click", function () {
+    fetch("/api/debug-log", { method: "DELETE" })
+      .then(loadDebug)
+      .catch(function () {});
+  });
+
+  document.getElementById("rows").addEventListener("click", function (event) {
+    var button = event.target;
+    if (button.tagName !== "BUTTON" || !button.classList.contains("row-check")) return;
+    var deviceId = button.getAttribute("data-device-id");
+    button.disabled = true;
+    button.textContent = "\\u2026";
+    fetch("/api/devices/refresh", {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ deviceId: deviceId })
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error("refresh failed (" + r.status + ")");
+        return r.json();
+      })
+      .then(function (payload) {
+        if (payload.device) {
+          var tr = button.closest("tr");
+          var fresh = renderDeviceRow(payload.device);
+          fresh.classList.add("flash");
+          if (tr && tr.parentNode) tr.parentNode.replaceChild(fresh, tr);
+        }
+      })
+      .catch(function (err) {
+        button.disabled = false;
+        button.textContent = "Check";
+        showError(String(err && err.message ? err.message : err));
+      });
+  });
 
   refresh();
   setInterval(refresh, 60000);

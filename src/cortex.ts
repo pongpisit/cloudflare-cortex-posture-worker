@@ -1,4 +1,5 @@
 import type { CortexEndpoint, RuntimeEnv } from "./types";
+import { appendDebugLog, getAppSettings } from "./repository";
 
 interface CortexReply {
   reply?: {
@@ -85,17 +86,29 @@ async function callCortex(body: unknown, env: RuntimeEnv): Promise<CortexReply> 
   const timeoutMs = positiveNumber(env.CORTEX_TIMEOUT_MS, 15_000);
   const baseUrl = new URL(env.CORTEX_BASE_URL);
   const url = new URL(ENDPOINT_PATH, `${baseUrl.origin}/`).toString();
+  const debug = await debugLoggingEnabled(env);
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     let response: Response;
+    const headers = await createCortexHeaders(env);
+    const startedAt = Date.now();
+    await logCortexRequest(env.DB, url, headers, body, debug);
     try {
       response = await fetch(url, {
         method: "POST",
-        headers: await createCortexHeaders(env),
+        headers,
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
+      await logCortexResponse(
+        env.DB,
+        url,
+        null,
+        `fetch error: ${error instanceof Error ? error.message : String(error)}`,
+        Date.now() - startedAt,
+        debug,
+      );
       if (attempt === 3) throw error;
       await sleep(attempt * 500);
       continue;
@@ -103,12 +116,28 @@ async function callCortex(body: unknown, env: RuntimeEnv): Promise<CortexReply> 
 
     if ((response.status === 429 || response.status >= 500) && attempt < 3) {
       await response.body?.cancel();
+      await logCortexResponse(
+        env.DB,
+        url,
+        response.status,
+        "(retrying)",
+        Date.now() - startedAt,
+        debug,
+      );
       const retryAfter = Number(response.headers.get("retry-after") ?? 0);
       await sleep(retryAfter > 0 ? retryAfter * 1000 : attempt * 500);
       continue;
     }
 
     const parsed = await readJson<CortexReply>(response, MAX_RESPONSE_BYTES);
+    await logCortexResponse(
+      env.DB,
+      url,
+      response.status,
+      JSON.stringify(parsed),
+      Date.now() - startedAt,
+      debug,
+    );
     if (!response.ok) {
       const message =
         parsed.reply?.err_msg ??
@@ -123,6 +152,91 @@ async function callCortex(body: unknown, env: RuntimeEnv): Promise<CortexReply> 
   }
 
   throw new Error("Cortex API retry limit reached");
+}
+
+async function debugLoggingEnabled(env: RuntimeEnv): Promise<boolean> {
+  try {
+    return (await getAppSettings(env.DB)).debugLogEnabled;
+  } catch {
+    return false;
+  }
+}
+
+async function logCortexRequest(
+  db: D1Database,
+  url: string,
+  headers: Record<string, string>,
+  body: unknown,
+  enabled: boolean,
+): Promise<void> {
+  if (!enabled) return;
+  try {
+    await appendDebugLog(db, {
+      createdAt: Date.now(),
+      source: "cortex",
+      direction: "request",
+      method: "POST",
+      url,
+      status: null,
+      headers: JSON.stringify(redactHeaders(headers), null, 2),
+      body: truncateDebugBody(JSON.stringify(body, null, 2)),
+      durationMs: null,
+    });
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "debug_log_error",
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+}
+
+async function logCortexResponse(
+  db: D1Database,
+  url: string,
+  status: number | null,
+  body: string,
+  durationMs: number,
+  enabled: boolean,
+): Promise<void> {
+  if (!enabled) return;
+  try {
+    await appendDebugLog(db, {
+      createdAt: Date.now(),
+      source: "cortex",
+      direction: "response",
+      method: "POST",
+      url,
+      status,
+      headers: null,
+      body: truncateDebugBody(body),
+      durationMs,
+    });
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "debug_log_error",
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  }
+}
+
+function redactHeaders(
+  headers: Record<string, string>,
+): Record<string, string> {
+  const copy = { ...headers };
+  if (copy.authorization) copy.authorization = "[redacted]";
+  return copy;
+}
+
+const DEBUG_BODY_LIMIT = 8000;
+
+function truncateDebugBody(value: string): string {
+  return value.length > DEBUG_BODY_LIMIT
+    ? `${value.slice(0, DEBUG_BODY_LIMIT)}... (${value.length} chars, truncated)`
+    : value;
 }
 
 async function createCortexHeaders(

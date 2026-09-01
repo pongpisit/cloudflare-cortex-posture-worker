@@ -3,6 +3,7 @@ import { getEndpointsByHostnames, getEndpointsByIds } from "./cortex";
 import {
   listAvailableSerialLists,
   reconcileNoncompliantSerialList,
+  type SerialListSyncResult,
 } from "./cloudflare-list";
 import { dashboardPage } from "./dashboard";
 import { evaluateEndpoint, findCortexEndpoint, normalizeHostname } from "./posture";
@@ -10,13 +11,17 @@ import { ensureSchema } from "./schema";
 import {
   claimDueEndpointIds,
   claimSyncLease,
+  clearDebugLog,
   getAppSettings,
   bootstrapAppSettings,
   getDashboardIntegrations,
+  getDeviceComplianceByDeviceId,
   getDeviceCounts,
+  getDeviceMappingByDeviceId,
   getSerialComplianceDecisions,
   getStoredEvaluations,
   invalidateDeviceMappings,
+  listDebugLog,
   listDeviceCompliance,
   markMissingEndpoints,
   recordCortexError,
@@ -43,12 +48,29 @@ import type {
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_DEVICES = 1000;
 
+let schemaEnsured = false;
+
 export default {
   async fetch(request, env, ctx): Promise<Response> {
     try {
       const url = new URL(request.url);
 
       await validateAccessRequest(request, env);
+
+      if (!schemaEnsured) {
+        try {
+          await ensureSchema(env.DB);
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "request_schema_error",
+              error: errorMessage(error),
+            }),
+          );
+        } finally {
+          schemaEnsured = true;
+        }
+      }
 
       if (url.pathname === "/health") {
         if (request.method !== "GET") return methodNotAllowed("GET");
@@ -68,6 +90,25 @@ export default {
       if (url.pathname === "/api/devices") {
         if (request.method !== "GET") return methodNotAllowed("GET");
         return await getApiDevices(url, env);
+      }
+
+      if (url.pathname === "/api/devices/refresh") {
+        if (request.method !== "POST") return methodNotAllowed("POST");
+        return await postApiDeviceRefresh(request, env);
+      }
+
+      if (url.pathname === "/api/sync") {
+        if (request.method !== "POST") return methodNotAllowed("POST");
+        return await postApiSync(env);
+      }
+
+      if (url.pathname === "/api/debug-log") {
+        if (request.method === "GET") return await getApiDebugLog(url, env);
+        if (request.method === "DELETE") {
+          await clearDebugLog(env.DB);
+          return json({ cleared: true });
+        }
+        return methodNotAllowed("GET, DELETE");
       }
 
       if (url.pathname === "/api/settings") {
@@ -259,21 +300,9 @@ export default {
 
     if (settings?.listSyncEnabled) {
       if (settings.cloudflareAccountId && settings.serialListId) {
-        let leaseToken: string | null = null;
         try {
-          leaseToken = await claimSyncLease(
-            env.DB,
-            "cloudflare_serial_list",
-            Date.now(),
-          );
-          if (leaseToken) {
-            const result = await reconcileNoncompliantSerialList(env, {
-              cloudflareAccountId: settings.cloudflareAccountId,
-              serialListId: settings.serialListId,
-              maxContentAgeDays: settings.maxContentAgeDays,
-              listMaxItems: settings.listMaxItems,
-            });
-            await recordListSyncSuccess(env.DB, result.count, Date.now());
+          const result = await synchronizeList(env, settings);
+          if (result) {
             console.log(
               JSON.stringify({
                 event: "serial_denylist_synchronized",
@@ -300,21 +329,6 @@ export default {
               error: detail,
             }),
           );
-        } finally {
-          if (leaseToken) {
-            await releaseSyncLease(
-              env.DB,
-              "cloudflare_serial_list",
-              leaseToken,
-            ).catch((error: unknown) => {
-              console.error(
-                JSON.stringify({
-                  event: "serial_denylist_lease_release_error",
-                  error: errorMessage(error),
-                }),
-              );
-            });
-          }
         }
       } else {
         const detail =
@@ -714,6 +728,117 @@ async function getCloudflareLists(env: Env): Promise<Response> {
   }
 }
 
+async function postApiDeviceRefresh(
+  request: Request,
+  env: Env,
+): Promise<Response> {
+  const body = await readRequestJson(request, 16 * 1024);
+  if (!isRecord(body) || typeof body.deviceId !== "string" || !body.deviceId.trim()) {
+    throw new ClientError(400, "device_id_required");
+  }
+  const deviceId = body.deviceId.trim();
+  const mapping = await getDeviceMappingByDeviceId(env.DB, deviceId);
+  if (!mapping) throw new ClientError(404, "device_not_found");
+
+  const runtimeEnv = requireRuntimeEnv(env);
+  let endpoints;
+  try {
+    endpoints = await getEndpointsByIds([mapping.cortexEndpointId], runtimeEnv);
+  } catch (error) {
+    await recordCortexError(env.DB, errorMessage(error), Date.now()).catch(
+      () => {},
+    );
+    throw error;
+  }
+  const endpoint = endpoints[0];
+  if (!endpoint) throw new ClientError(404, "cortex_endpoint_not_found");
+
+  const maxContentAgeDays = await currentMaxContentAgeDays(env.DB);
+  await persistEvaluatedEndpoints([endpoint], runtimeEnv, maxContentAgeDays);
+  await recordCortexSuccess(env.DB, Date.now()).catch(() => {});
+
+  const settings = await getAppSettings(env.DB);
+  const device = await getDeviceComplianceByDeviceId(
+    env.DB,
+    deviceId,
+    settings.maxContentAgeDays * 86_400_000,
+  );
+  return json({ device });
+}
+
+async function postApiSync(env: Env): Promise<Response> {
+  const settings = await getAppSettings(env.DB);
+  if (!settings.listSyncEnabled) {
+    throw new ClientError(400, "list_sync_disabled");
+  }
+  if (!settings.cloudflareAccountId || !settings.serialListId) {
+    throw new ClientError(400, "list_not_configured");
+  }
+  try {
+    const result = await synchronizeList(env, settings);
+    if (!result) throw new ClientError(409, "sync_already_running");
+    return json({ changed: result.changed, count: result.count });
+  } catch (error) {
+    if (error instanceof ClientError) throw error;
+    await recordListSyncError(
+      env.DB,
+      errorMessage(error),
+      Date.now(),
+    ).catch(() => {});
+    throw new ClientError(502, `sync_failed: ${errorMessage(error)}`);
+  }
+}
+
+async function getApiDebugLog(url: URL, env: Env): Promise<Response> {
+  const limitRaw = url.searchParams.get("limit");
+  let limit = 50;
+  if (limitRaw !== null) {
+    const parsed = Number(limitRaw);
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 200) {
+      throw new ClientError(400, "invalid_limit");
+    }
+    limit = parsed;
+  }
+  const entries = await listDebugLog(env.DB, limit);
+  return json({ entries });
+}
+
+async function synchronizeList(
+  env: Env,
+  settings: AppSettings,
+): Promise<SerialListSyncResult | null> {
+  if (!settings.cloudflareAccountId || !settings.serialListId) {
+    throw new Error("Cloudflare list is not selected");
+  }
+  const leaseToken = await claimSyncLease(
+    env.DB,
+    "cloudflare_serial_list",
+    Date.now(),
+  );
+  if (!leaseToken) return null;
+  try {
+    const result = await reconcileNoncompliantSerialList(env, {
+      cloudflareAccountId: settings.cloudflareAccountId,
+      serialListId: settings.serialListId,
+      maxContentAgeDays: settings.maxContentAgeDays,
+      listMaxItems: settings.listMaxItems,
+    });
+    await recordListSyncSuccess(env.DB, result.count, Date.now());
+    return result;
+  } finally {
+    await releaseSyncLease(env.DB, "cloudflare_serial_list", leaseToken).catch(
+      (error: unknown) => {
+        console.error(
+          JSON.stringify({
+            event: "serial_denylist_lease_release_error",
+            error: errorMessage(error),
+          }),
+        );
+      },
+    );
+  }
+}
+
 function cloudflareApiToken(env: Env): string | null {
   return (
     (env as Env & { CLOUDFLARE_API_TOKEN?: string }).CLOUDFLARE_API_TOKEN
@@ -762,6 +887,12 @@ function parseSettingsUpdate(body: unknown): Record<string, string> {
       throw new ClientError(400, "invalid_list_sync_enabled");
     }
     updates.list_sync_enabled = body.listSyncEnabled ? "true" : "false";
+  }
+  if (body.debugLogEnabled !== undefined) {
+    if (typeof body.debugLogEnabled !== "boolean") {
+      throw new ClientError(400, "invalid_debug_log_enabled");
+    }
+    updates.debug_log_enabled = body.debugLogEnabled ? "true" : "false";
   }
   if (body.maxContentAgeDays !== undefined) {
     updates.max_content_age_days = String(

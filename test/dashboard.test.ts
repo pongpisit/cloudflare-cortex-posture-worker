@@ -3,6 +3,7 @@ import {
   getAppSettings,
   getDashboardIntegrations,
   getDeviceCounts,
+  listDebugLog,
   listDeviceCompliance,
 } from "../src/repository";
 
@@ -67,6 +68,7 @@ describe("dashboard repository", () => {
       listSyncEnabled: false,
       maxContentAgeDays: 7,
       listMaxItems: 1000,
+      debugLogEnabled: true,
     });
   });
 
@@ -78,6 +80,7 @@ describe("dashboard repository", () => {
       { name: "list_sync_enabled", value: "true" },
       { name: "max_content_age_days", value: "14" },
       { name: "list_max_items", value: "5000" },
+      { name: "debug_log_enabled", value: "false" },
     ]);
     await expect(getAppSettings(db)).resolves.toEqual({
       cloudflareAccountId: "aa8ab6fe5b7f906df426a972033e922a",
@@ -86,7 +89,39 @@ describe("dashboard repository", () => {
       listSyncEnabled: true,
       maxContentAgeDays: 14,
       listMaxItems: 5000,
+      debugLogEnabled: false,
     });
+  });
+
+  it("maps debug log rows", async () => {
+    const db = fakeDb([
+      {
+        id: 2,
+        created_at: 1001,
+        source: "cortex",
+        direction: "response",
+        method: "POST",
+        url: "https://api.example.com/public_api/v1/endpoints/get_endpoint",
+        status: 200,
+        headers: null,
+        body: "{\"reply\":{}}",
+        duration_ms: 412,
+      },
+    ]);
+    await expect(listDebugLog(db, 50)).resolves.toEqual([
+      {
+        id: 2,
+        createdAt: 1001,
+        source: "cortex",
+        direction: "response",
+        method: "POST",
+        url: "https://api.example.com/public_api/v1/endpoints/get_endpoint",
+        status: 200,
+        headers: null,
+        body: "{\"reply\":{}}",
+        durationMs: 412,
+      },
+    ]);
   });
 
   it("marks stale content noncompliant and fresh or missing content compliant", async () => {

@@ -7,6 +7,7 @@ const MIGRATION_NAMES = [
   "0006_serial_removals",
   "0007_refresh_lease_tokens",
   "0008_app_settings",
+  "0009_debug_log",
 ] as const;
 
 // Idempotent equivalent of migrations 0001-0008, executed as one D1 batch
@@ -75,6 +76,18 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       name TEXT PRIMARY KEY,
       value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS debug_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at INTEGER NOT NULL,
+      source TEXT NOT NULL DEFAULT 'cortex',
+      direction TEXT NOT NULL,
+      method TEXT,
+      url TEXT NOT NULL,
+      status INTEGER,
+      headers TEXT,
+      body TEXT,
+      duration_ms INTEGER
     )`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_device_mappings_endpoint
       ON device_mappings(cortex_endpoint_id)`),

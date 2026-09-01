@@ -38,6 +38,7 @@ describe("schema bootstrap", () => {
       "sync_leases",
       "serial_removals",
       "app_settings",
+      "debug_log",
     ]) {
       expect(
         statements.some((sql) =>
@@ -68,7 +69,7 @@ describe("schema bootstrap", () => {
       statements.some((sql) => sql.startsWith("INSERT OR IGNORE INTO d1_migrations")),
     ).toBe(true);
     const migrationBind = bound.find(
-      (values) => values.length === 8 && values.every((v) => typeof v === "string"),
+      (values) => values.length === 9 && values.every((v) => typeof v === "string"),
     );
     expect(migrationBind).toEqual([
       "0001_initial",
@@ -79,6 +80,7 @@ describe("schema bootstrap", () => {
       "0006_serial_removals",
       "0007_refresh_lease_tokens",
       "0008_app_settings",
+      "0009_debug_log",
     ]);
     expect(
       statements.filter((sql) => sql.includes("INSERT OR IGNORE INTO integration_status"))
