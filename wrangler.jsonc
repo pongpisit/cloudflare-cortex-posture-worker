@@ -13,8 +13,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "cortex-posture",
-      "database_id": "d8c19973-0a29-495b-bf6b-4716f02861f1",
+      "database_name": "cortex-posture2",
+      "database_id": "87b60650-1431-4ef3-9a4d-ceee3922932a",
       "migrations_dir": "migrations"
     }
   ],

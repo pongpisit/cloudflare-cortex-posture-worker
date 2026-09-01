@@ -630,6 +630,26 @@ export async function saveAppSettings(
   }
 }
 
+export async function bootstrapAppSettings(
+  db: D1Database,
+  updates: Record<string, string>,
+  now = Date.now(),
+): Promise<string[]> {
+  const applied: string[] = [];
+  for (const [name, value] of Object.entries(updates)) {
+    if (!(APP_SETTING_KEYS as readonly string[]).includes(name)) continue;
+    const result = await db
+      .prepare(
+        `INSERT OR IGNORE INTO app_settings(name, value, updated_at)
+         VALUES (?, ?, ?)`,
+      )
+      .bind(name, value, now)
+      .run();
+    if (result.meta.changes === 1) applied.push(name);
+  }
+  return applied;
+}
+
 function settingInt(
   value: string | undefined,
   minimum: number,

@@ -6,10 +6,12 @@ import {
 } from "./cloudflare-list";
 import { dashboardPage } from "./dashboard";
 import { evaluateEndpoint, findCortexEndpoint, normalizeHostname } from "./posture";
+import { ensureSchema } from "./schema";
 import {
   claimDueEndpointIds,
   claimSyncLease,
   getAppSettings,
+  bootstrapAppSettings,
   getDashboardIntegrations,
   getDeviceCounts,
   getSerialComplianceDecisions,
@@ -230,6 +232,19 @@ export default {
   },
 
   async scheduled(_controller, env): Promise<void> {
+    try {
+      await ensureSchema(env.DB);
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "scheduled_schema_error",
+          error: errorMessage(error),
+        }),
+      );
+    }
+
+    await applyBootstrapSettings(env);
+
     let settings: AppSettings | null = null;
     try {
       settings = await getAppSettings(env.DB);
@@ -456,6 +471,45 @@ async function processRefreshMessage(
     now,
   );
   return true;
+}
+
+async function applyBootstrapSettings(env: Env): Promise<void> {
+  const raw = (
+    env as Env & { BOOTSTRAP_SETTINGS?: string }
+  ).BOOTSTRAP_SETTINGS?.trim();
+  if (!raw) return;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) {
+      throw new Error("bootstrap settings must be a JSON object");
+    }
+    const updates: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (
+        typeof value === "string" ||
+        typeof value === "number" ||
+        typeof value === "boolean"
+      ) {
+        updates[key] = String(value);
+      }
+    }
+    const applied = await bootstrapAppSettings(env.DB, updates, Date.now());
+    if (applied.length > 0) {
+      console.log(
+        JSON.stringify({
+          event: "bootstrap_settings_applied",
+          keys: applied.sort(),
+        }),
+      );
+    }
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "bootstrap_settings_error",
+        error: errorMessage(error),
+      }),
+    );
+  }
 }
 
 async function currentMaxContentAgeDays(db: D1Database): Promise<number> {

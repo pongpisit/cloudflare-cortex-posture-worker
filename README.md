@@ -223,6 +223,9 @@ npm run deploy
 Wrangler resolves the target account from your `wrangler login` session; pass
 `--account-id` if your login has access to multiple accounts.
 
+The first Cron run self-provisions the D1 schema, so the Worker recovers on a
+fresh database even if migrations have not been applied yet.
+
 Add a production [Workers Custom Domain](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/),
 such as `cortex-posture.example.com`, for the custom provider endpoint.
 
@@ -421,6 +424,16 @@ curl -X PUT "https://cortex-posture.example.com/api/settings" \
   -H "CF-Access-Client-Secret: <service-token-client-secret>" \
   -H "content-type: application/json" \
   -d '{"serialListId": "<list-id>", "listSyncEnabled": true}'
+```
+
+For scripted deployments before Access is configured, set a
+`BOOTSTRAP_SETTINGS` secret to a JSON object. The next Cron run applies any
+unset settings (existing dashboard values are never overwritten), after which
+the secret can be deleted:
+
+```bash
+echo '{"cloudflare_account_id":"<account-id>","serial_list_id":"<list-id>","list_sync_enabled":"true"}' |
+  npx wrangler secret put BOOTSTRAP_SETTINGS
 ```
 
 The service-token Access policy alone does not render a login page. To open the
