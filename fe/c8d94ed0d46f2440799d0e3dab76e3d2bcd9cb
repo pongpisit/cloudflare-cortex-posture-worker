@@ -1,0 +1,19 @@
+.dev.vars.example
+  s_55e1360a41c663::t_cd06d078281edc 4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "fec8d94ed0d46f2440799d0e3dab76e3d2bcd9cb",
+  "prompts": {},
+  "sessions": {
+    "s_55e1360a41c663": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_fc4336d99ffeR5T1fO9EeHuzZq",
+        "model": "gpt-5.6"
+      },
+      "human_author": "pongpisit <pongpisit@cloudflare.com>"
+    }
+  }
+}
