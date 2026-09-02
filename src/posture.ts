@@ -79,6 +79,12 @@ export function normalizeMacCollection(value: unknown): Set<string> {
   return result;
 }
 
+// Normalized form of a single reported MAC address, or null when the poll
+// carries none. Compared against the mapping's verified MAC on every /check.
+export function normalizeMac(value: unknown): string | null {
+  return [...normalizeMacCollection(value)][0] ?? null;
+}
+
 export function normalizeTimestamp(value: unknown): number {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return 0;

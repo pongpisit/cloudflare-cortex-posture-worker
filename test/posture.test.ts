@@ -3,6 +3,7 @@ import {
   evaluateEndpoint,
   findCortexEndpoint,
   normalizeHostname,
+  normalizeMac,
   normalizeMacCollection,
   normalizeTimestamp,
 } from "../src/posture";
@@ -38,6 +39,14 @@ describe("device normalization", () => {
 
   it("normalizes epoch seconds to milliseconds", () => {
     expect(normalizeTimestamp(1_700_000_000)).toBe(1_700_000_000_000);
+  });
+
+  it("normalizes a single reported MAC for identity comparison", () => {
+    expect(normalizeMac("00-11-22-33-44-55")).toBe("001122334455");
+    expect(normalizeMac(["AA:BB:CC:DD:EE:FF"])).toBe("aabbccddeeff");
+    expect(normalizeMac(undefined)).toBeNull();
+    expect(normalizeMac("")).toBeNull();
+    expect(normalizeMac("not-a-mac")).toBeNull();
   });
 });
 

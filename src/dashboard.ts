@@ -415,11 +415,6 @@ const DASHBOARD_HTML = `<!doctype html>
     document.getElementById("debug-log-enabled").checked = s.debugLogEnabled !== false;
 
     var flags = [];
-    if (payload.auth_mode === "none") {
-      flags.push("AUTH DISABLED (development mode)");
-    } else {
-      flags.push("Auth: Cloudflare Access");
-    }
     flags.push(payload.cloudflare_api_token_configured ? "Cloudflare API token configured" : "Cloudflare API token missing");
     flags.push(payload.cortex_configured ? "Cortex configured" : "Cortex not configured");
     if (s.serialListName) flags.push("List: " + s.serialListName);

@@ -1,4 +1,3 @@
-import { authMode, AuthenticationError, validateAccessRequest } from "./auth";
 import { getEndpointsByHostnames, getEndpointsByIds } from "./cortex";
 import {
   listAvailableSerialLists,
@@ -6,7 +5,12 @@ import {
   type SerialListSyncResult,
 } from "./cloudflare-list";
 import { dashboardPage } from "./dashboard";
-import { evaluateEndpoint, findCortexEndpoint, normalizeHostname } from "./posture";
+import {
+  evaluateEndpoint,
+  findCortexEndpoint,
+  normalizeHostname,
+  normalizeMac,
+} from "./posture";
 import { ensureSchema } from "./schema";
 import {
   claimDueEndpointIds,
@@ -61,8 +65,6 @@ export default {
   async fetch(request, env, ctx): Promise<Response> {
     try {
       const url = new URL(request.url);
-
-      await validateAccessRequest(request, env);
 
       if (!schemaEnsured) {
         try {
@@ -177,13 +179,15 @@ export default {
 
         const currentSerial = device.serial_number?.trim() || null;
         const storedSerial = stored.serialNumber?.trim() || null;
-        // Hostname is the mapping identity; MAC only disambiguates duplicate
-        // hostnames at discovery time, so a NIC change does not invalidate a
-        // stored mapping.
+        // The mapping identity is hostname + MAC: a rename or a NIC change
+        // invalidates the mapping and triggers re-discovery. Serial-number
+        // changes never invalidate; they flow through the silent update path
+        // below so the denylist entry follows the current serial.
+        const currentMac = normalizeMac(device.mac_address);
         const identityChanged =
           normalizeHostname(device.hostname) !== stored.hostname ||
           Boolean(
-            storedSerial && currentSerial && storedSerial !== currentSerial,
+            stored.verifiedMac && currentMac && stored.verifiedMac !== currentMac,
           );
         if (identityChanged) {
           result[device.device_id] = { s2s_id: "", score: 0 };
@@ -296,9 +300,6 @@ export default {
 
       return json({ result });
     } catch (error) {
-      if (error instanceof AuthenticationError) {
-        return json({ error: "forbidden" }, 403);
-      }
       if (error instanceof ClientError) {
         return json({ error: error.message }, error.status);
       }
@@ -913,7 +914,6 @@ async function getApiSettings(env: Env): Promise<Response> {
   const settings = await getAppSettings(env.DB);
   return json({
     settings,
-    auth_mode: authMode(env),
     cloudflare_api_token_configured: Boolean(cloudflareApiToken(env)),
     cortex_configured: cortexConfigured(env),
     sync_ready: Boolean(

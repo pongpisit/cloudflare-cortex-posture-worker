@@ -20,12 +20,6 @@
   },
   "cloudflare": {
     "bindings": {
-      "ACCESS_TEAM_DOMAIN": {
-        "description": "Your Zero Trust team domain, e.g. `https://myteam.cloudflareaccess.com`. Used to authenticate requests to this Worker's API."
-      },
-      "ACCESS_AUD": {
-        "description": "AUD of the Access application protecting this Worker."
-      },
       "CORTEX_BASE_URL": {
         "description": "Cortex XDR API HTTPS origin. See the README's Cortex Configuration section."
       },
@@ -39,9 +33,6 @@
         "description": "Cloudflare API token scoped to the account with **Zero Trust Write**. Also powers the dashboard's list selector."
       }
     }
-  },
-  "dependencies": {
-    "jose": "^6.2.10"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

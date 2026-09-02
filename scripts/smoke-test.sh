@@ -1,26 +1,12 @@
 #!/usr/bin/env bash
-# Smoke-test the deployed, Access-protected Worker API with curl.
+# Smoke-test the deployed Worker API with curl.
 #
 # Usage:
-#   BASE_URL="https://cortex-posture.example.com" \
-#   CF_ACCESS_CLIENT_ID="<service-token-client-id>" \
-#   CF_ACCESS_CLIENT_SECRET="<service-token-client-secret>" \
-#   npm run smoke
-#
-# The service token is the one created in the README's
-# "Custom Provider Setup" section. Cloudflare Access exchanges the
-# CF-Access-Client-Id/Secret headers for a CF-Access-Jwt-Assertion header at
-# the edge, which is the only credential the Worker itself accepts.
+#   BASE_URL="https://cortex-posture.example.com" npm run smoke
 set -euo pipefail
 
 : "${BASE_URL:?Set BASE_URL to the Worker URL, e.g. https://cortex-posture.example.com}"
 
-# Optional while AUTH_MODE=none: Access exchanges these headers for the JWT
-# the Worker accepts once AUTH_MODE=access.
-auth=(
-  -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID:-}"
-  -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET:-}"
-)
 failures=0
 
 status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
@@ -37,36 +23,29 @@ expect() {
 
 echo "Worker: ${BASE_URL}"
 
-expect "health" 200 "$(status "${BASE_URL}/health" "${auth[@]}")"
-expect "dashboard page" 200 "$(status "${BASE_URL}/dashboard" "${auth[@]}")"
-expect "api overview" 200 "$(status "${BASE_URL}/api/overview" "${auth[@]}")"
-expect "api settings" 200 "$(status "${BASE_URL}/api/settings" "${auth[@]}")"
+expect "health" 200 "$(status "${BASE_URL}/health")"
+expect "dashboard page" 200 "$(status "${BASE_URL}/dashboard")"
+expect "api overview" 200 "$(status "${BASE_URL}/api/overview")"
+expect "api settings" 200 "$(status "${BASE_URL}/api/settings")"
 expect "api devices (all)" 200 \
-  "$(status "${BASE_URL}/api/devices?status=all&limit=10" "${auth[@]}")"
+  "$(status "${BASE_URL}/api/devices?status=all&limit=10")"
 expect "api devices (noncompliant)" 200 \
-  "$(status "${BASE_URL}/api/devices?status=noncompliant" "${auth[@]}")"
+  "$(status "${BASE_URL}/api/devices?status=noncompliant")"
 expect "api devices (search)" 200 \
-  "$(status "${BASE_URL}/api/devices?search=desktop&limit=10" "${auth[@]}")"
-expect "api debug log" 200 "$(status "${BASE_URL}/api/debug-log" "${auth[@]}")"
+  "$(status "${BASE_URL}/api/devices?search=desktop&limit=10")"
+expect "api debug log" 200 "$(status "${BASE_URL}/api/debug-log")"
 expect "refresh unknown device rejected" 404 \
-  "$(status -X POST -H 'content-type: application/json' -d '{"deviceId":"does-not-exist"}' "${BASE_URL}/api/devices/refresh" "${auth[@]}")"
+  "$(status -X POST -H 'content-type: application/json' -d '{"deviceId":"does-not-exist"}' "${BASE_URL}/api/devices/refresh")"
 expect "delete unknown device rejected" 404 \
-  "$(status -X POST -H 'content-type: application/json' -d '{"deviceId":"does-not-exist"}' "${BASE_URL}/api/devices/delete" "${auth[@]}")"
+  "$(status -X POST -H 'content-type: application/json' -d '{"deviceId":"does-not-exist"}' "${BASE_URL}/api/devices/delete")"
 expect "check (empty inventory)" 200 \
-  "$(status -X POST -H 'content-type: application/json' -d '{"devices":[]}' "${BASE_URL}/check" "${auth[@]}")"
+  "$(status -X POST -H 'content-type: application/json' -d '{"devices":[]}' "${BASE_URL}/check")"
 expect "rejects invalid device filter" 400 \
-  "$(status "${BASE_URL}/api/devices?status=bogus" "${auth[@]}")"
-
-unauthenticated=$(status "${BASE_URL}/api/overview")
-if [ "$unauthenticated" = "200" ]; then
-  echo "WARN  unauthenticated api overview request allowed (AUTH_MODE=none?)"
-else
-  echo "PASS  unauthenticated api overview request rejected (${unauthenticated})"
-fi
+  "$(status "${BASE_URL}/api/devices?status=bogus")"
 
 echo
 echo "Sample /api/overview response:"
-curl -s "${BASE_URL}/api/overview" "${auth[@]}" | head -c 4000
+curl -s "${BASE_URL}/api/overview" | head -c 4000
 echo
 
 if [ "$failures" -gt 0 ]; then
