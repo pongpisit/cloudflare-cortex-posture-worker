@@ -169,6 +169,8 @@ stale device is allowed until Cortex refresh and list synchronization succeed.
 
 ## Documentation
 
+- [Architecture guide](docs/architecture.md) — every API call, data flow,
+  comparison logic, and the D1 schema.
 - [Setup guide](docs/setup.md) — deploy, Cortex configuration, serial list,
   custom provider, policies, validation, and smoke testing.
 - [Dashboard guide](docs/dashboard.md) — the operations dashboard and every
