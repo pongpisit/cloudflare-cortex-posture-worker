@@ -5,9 +5,6 @@
   "compatibility_date": "2026-08-26",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
-  "vars": {
-    "CORTEX_BASE_URL": "https://replace-me.example.invalid"
-  },
   "d1_databases": [
     {
       "binding": "DB",
