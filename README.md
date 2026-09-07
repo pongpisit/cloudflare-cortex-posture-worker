@@ -97,6 +97,10 @@ changes:
 - Identity checks tolerate missing data: a poll that omits the MAC never
   invalidates a mapping that has one, and vice versa.
 
+For every periodic mechanism and its cadence — how the D1 inventory stays
+current without a nightly bulk import — see the
+[data lifecycle](docs/architecture.md#data-lifecycle) in the architecture guide.
+
 ### Behavior
 
 For an expected 12,000-device fleet with 1–5% stale endpoints, the list

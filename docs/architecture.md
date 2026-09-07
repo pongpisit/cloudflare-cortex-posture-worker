@@ -8,6 +8,7 @@ compares it. For the high-level overview, see the
 
 - [System context](#system-context)
 - [End-to-end data flow](#end-to-end-data-flow)
+- [Data lifecycle](#data-lifecycle)
 - [Decision logic](#decision-logic)
 - [API reference](#api-reference)
 - [Data storage](#data-storage)
@@ -89,6 +90,29 @@ sequenceDiagram
 Poll cadence: Cloudflare delivers inventory on its own schedule (about every
 10 minutes while devices are online). The Worker answers from stored snapshots
 without calling Cortex, so poll latency does not depend on Cortex availability.
+
+## Data lifecycle
+
+There is no nightly bulk import from Cortex. The D1 inventory reconciles
+continuously — each mechanism below runs on its own cadence and writes only
+what changed:
+
+| Mechanism | Cadence | Effect in D1 |
+| --- | --- | --- |
+| Detection sweep | Every 4 hours per endpoint (`DETECTION_REFRESH_MINUTES`) | Cortex refresh upserts each known endpoint's `endpoint_snapshots` row: content time, score, reason, `cortex_refreshed_at` |
+| Recovery sweep | Every 30 minutes per denylisted endpoint (`RECOVERY_REFRESH_MINUTES`) | Same upsert, prioritized so recovered devices are unblocked promptly |
+| Provider poll | About every 10 minutes while devices are online | Re-verifies each stored mapping's hostname and MAC; touches `last_seen_at` at most once per device per day |
+| Discovery | On demand, when a poll reports an unknown or invalidated device | Inserts the `device_mappings` row and first `endpoint_snapshots` row via hostname lookup |
+| Re-discovery | Hourly, for mappings whose Cortex endpoint disappeared | Re-points the mapping to the current `endpoint_id` (same hostname) after agent reinstalls |
+| Stale-device cleanup | Daily, and only while the provider is polling | Deletes mappings unseen for `STALE_DEVICE_DAYS` (default 30) and tombstones their serials |
+| List sync | Every 5 minutes, skipped when nothing changed | Reads the compliance decision and replaces the Zero Trust list |
+
+Over a single day at defaults, a 12,000-device fleet accumulates six detection
+sweeps per endpoint (72,000 endpoint refreshes in 720 batched Cortex requests),
+one `last_seen_at` touch per device, and writes only for genuine churn — new
+devices, renames, NIC changes, serial changes, and departures. Departed
+machines are the only rows ever deleted, and only after 30 days of silence,
+so a transient outage can never remove a device.
 
 ## Decision logic
 
