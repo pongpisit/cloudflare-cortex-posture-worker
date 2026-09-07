@@ -19,8 +19,24 @@ attach to policies as a condition.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/pongpisit/cloudflare-cortex-posture-worker)
 
+## Requirements
+
+Everything below is mandatory to run the Worker end to end:
+
+| Requirement | Used for | Notes |
+| --- | --- | --- |
+| Cloudflare **Workers** with Cron Triggers | Runs the Worker; a five-minute Cron drives Cortex refreshes and list synchronization | Workers Paid plan recommended — see [usage and cost](#usage-and-cost) |
+| Cloudflare **D1** database | Stores device mappings, endpoint snapshots, settings, and the debug log | Self-provisions its schema on first run; provisioned automatically by the deploy button |
+| Cloudflare **Queues** (plus a dead-letter queue) | Asynchronous Cortex discovery and refresh processing with bounded retries | Provisioned automatically by the deploy button |
+| Cloudflare **Zero Trust** | Hosts the `SERIAL` denylist, the custom service provider, and the Access/Gateway policies that enforce the list | Included in every Zero Trust plan, including the free tier |
+| **Cloudflare One Client (WARP)** enrolled on managed devices | Supplies the device inventory (device ID, serial, hostname, MAC) and is the enforcement point for policies | Windows, macOS, and Linux — serial-number checks are unsupported on mobile platforms |
+| **Cloudflare API token** with account-scoped *Zero Trust Write* | Lets the Worker maintain the serial list; also powers the dashboard's list selector | Create one under **My Profile > API Tokens** |
+| **Cortex XDR API key** with endpoint-read access | Reads each endpoint's `last_content_update_time`, hostname, and MAC via `get_endpoint` | Advanced or standard key; record the API key, key ID, and tenant API URL |
+| **Node.js and npm** | Deployment, tests, and the smoke test | Any current LTS release |
+
 ## Contents
 
+- [Requirements](#requirements)
 - [How it works](#how-it-works)
 - [Usage and cost](#usage-and-cost)
 - [Failure model](#failure-model)

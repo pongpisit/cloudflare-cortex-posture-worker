@@ -13,12 +13,11 @@ How to deploy and connect the Worker end to end:
 
 ## Prerequisites
 
-- Cloudflare Workers, D1, Queues, and Zero Trust (lists, custom service
-  provider, and Access/Gateway policies).
-- Permission to create Zero Trust lists and policies.
-- A Cloudflare API token scoped to the target account with **Zero Trust Write**.
-- A Cortex XDR API key with endpoint read access.
-- Node.js and npm.
+See [Requirements](../README.md#requirements) in the README for the complete
+mandatory list: Workers with Cron Triggers, D1, Queues, Zero Trust, the
+Cloudflare One Client on managed devices, a Cloudflare API token with
+account-scoped **Zero Trust Write**, a Cortex XDR API key with endpoint-read
+access, and Node.js with npm.
 
 Serial-number posture checks support Windows, macOS, and Linux. Cloudflare
 documents mobile platforms as unsupported for serial checks; use an MDM-provided
