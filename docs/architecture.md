@@ -114,6 +114,13 @@ devices, renames, NIC changes, serial changes, and departures. Departed
 machines are the only rows ever deleted, and only after 30 days of silence,
 so a transient outage can never remove a device.
 
+To verify that the enforceable subset covers the whole Cortex fleet, run the
+dashboard's **Coverage audit**: it scans the recently seen Cortex inventory
+(`windowDays`, default 30) and reports endpoints that have no Cloudflare
+device. Uncovered endpoints are enrollment gaps — they are reported, never
+imported, because a serial without a Cloudflare device can never be evaluated
+by a policy.
+
 ## Decision logic
 
 ### /check identity check (per polled device)

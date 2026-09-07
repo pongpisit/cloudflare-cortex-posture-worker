@@ -127,7 +127,9 @@ organically from `/check` inventory, so a device that appears in a poll is
 denylist-eligible within one five-minute Cron cycle. At 10-minute provider
 polling, a 12,000-device fleet is fully learned within the first one or two
 polls. Endpoints that never enroll in Cloudflare are never learned, which is
-correct: the denylist only affects devices Cloudflare can evaluate.
+correct: the denylist only affects devices Cloudflare can evaluate. Use the
+dashboard's **Coverage audit** to measure the gap — it scans the recent
+Cortex inventory and reports endpoints that have no Cloudflare device.
 
 ## Usage and cost
 

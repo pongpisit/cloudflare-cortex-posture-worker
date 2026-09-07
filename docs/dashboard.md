@@ -18,6 +18,12 @@ applied on the next Cron run without a redeploy:
   stays disabled until you turn it on.
 - **Sync now** runs the list synchronization immediately instead of waiting
   for the next Cron cycle.
+- **Coverage audit** scans the Cortex inventory for endpoints seen in the
+  last 30 days and reports how many have a Cloudflare device mapped in D1.
+  Uncovered endpoints cannot be enforced until their machines enroll the
+  Cloudflare One Client, so the audit surfaces enrollment gaps rather than
+  importing them. On large fleets it performs one Cortex request per 100
+  endpoints and can take a while.
 
 Each device row has a **Check** button that refreshes that single device from
 Cortex on demand and updates the row with the result. Rows also have
@@ -46,6 +52,7 @@ responses as incoming ones, with method, URL, status, duration, headers
 | `POST /api/devices/refresh` | Refresh devices from Cortex immediately: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100 |
 | `POST /api/devices/delete` | Delete devices from tracking: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100 |
 | `POST /api/sync` | Run the list synchronization immediately |
+| `POST /api/coverage?windowDays=30` | Diff the recently seen Cortex inventory against D1 mappings; returns `scanned`, `covered`, `uncovered`, `coverage_percent`, `truncated`, and an `uncovered_sample` of up to 100 endpoints |
 | `GET /api/debug-log?limit=N` | Recent Cortex request/response pairs, `limit` 1–200, default 50 |
 | `DELETE /api/debug-log` | Clear the debug log |
 | `GET /api/settings` | Current operational settings and readiness flags |

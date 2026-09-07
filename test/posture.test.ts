@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  coverageSummary,
   evaluateEndpoint,
   findCortexEndpoint,
   normalizeHostname,
@@ -103,6 +104,35 @@ describe("Cortex matching", () => {
         [endpoint(), endpoint({ endpoint_id: "cortex-2" })],
       ),
     ).toBeNull();
+  });
+});
+
+describe("coverage summary", () => {
+  it("reports full coverage when every endpoint is mapped", () => {
+    expect(
+      coverageSummary(
+        [endpoint(), endpoint({ endpoint_id: "cortex-2" })],
+        new Set(["cortex-1", "cortex-2"]),
+      ),
+    ).toEqual({ scanned: 2, covered: 2, uncovered: 0, coveragePercent: 100 });
+  });
+
+  it("reports partial coverage with one decimal", () => {
+    expect(
+      coverageSummary(
+        [endpoint(), endpoint({ endpoint_id: "cortex-2" }), endpoint({ endpoint_id: "cortex-3" })],
+        new Set(["cortex-2"]),
+      ),
+    ).toEqual({ scanned: 3, covered: 1, uncovered: 2, coveragePercent: 33.3 });
+  });
+
+  it("reports null coverage for an empty scan", () => {
+    expect(coverageSummary([], new Set())).toEqual({
+      scanned: 0,
+      covered: 0,
+      uncovered: 0,
+      coveragePercent: null,
+    });
   });
 });
 

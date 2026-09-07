@@ -85,6 +85,35 @@ export function normalizeMac(value: unknown): string | null {
   return [...normalizeMacCollection(value)][0] ?? null;
 }
 
+export interface CoverageSummary {
+  scanned: number;
+  covered: number;
+  uncovered: number;
+  coveragePercent: number | null;
+}
+
+// How much of the recently seen Cortex fleet has a Cloudflare device mapped
+// in D1. Uncovered endpoints are machines that cannot be enforced until they
+// enroll in Cloudflare — the coverage audit surfaces them so an operator can
+// act, but they are never imported into the denylist pipeline.
+export function coverageSummary(
+  endpoints: CortexEndpoint[],
+  mappedEndpointIds: Set<string>,
+): CoverageSummary {
+  let covered = 0;
+  for (const endpoint of endpoints) {
+    if (mappedEndpointIds.has(endpoint.endpoint_id)) covered += 1;
+  }
+  const scanned = endpoints.length;
+  return {
+    scanned,
+    covered,
+    uncovered: scanned - covered,
+    coveragePercent:
+      scanned === 0 ? null : Math.round((covered / scanned) * 1000) / 10,
+  };
+}
+
 export function normalizeTimestamp(value: unknown): number {
   const numeric = Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return 0;

@@ -189,6 +189,7 @@ const DASHBOARD_HTML = `<!doctype html>
       <div class="config-actions">
         <button type="button" id="load-lists">Load lists</button>
         <button type="button" id="sync-now">Sync now</button>
+        <button type="button" id="coverage-audit">Coverage audit</button>
         <button type="button" id="save-config" class="primary">Save configuration</button>
       </div>
     </div>
@@ -550,6 +551,34 @@ const DASHBOARD_HTML = `<!doctype html>
       });
   }
 
+  function coverageAudit() {
+    configMessage("Scanning Cortex inventory\\u2026 this can take a while on large fleets");
+    fetch("/api/coverage?windowDays=30", { method: "POST", headers: { accept: "application/json" } })
+      .then(function (r) {
+        if (!r.ok) throw new Error("coverage audit failed (" + r.status + ")");
+        return r.json();
+      })
+      .then(function (payload) {
+        var pct = payload.coverage_percent === null ? "n/a" : payload.coverage_percent + "%";
+        var msg =
+          "Coverage: " + payload.covered + "/" + payload.scanned +
+          " recent Cortex endpoints have a Cloudflare device (" + pct + ")" +
+          " \\u00b7 " + payload.uncovered + " uncovered";
+        if (payload.truncated) msg += " \\u00b7 scan truncated at 50000-endpoint safety limit";
+        if (payload.uncovered_sample && payload.uncovered_sample.length > 0) {
+          var names = payload.uncovered_sample
+            .slice(0, 5)
+            .map(function (e) { return e.hostname || e.endpoint_id; })
+            .join(", ");
+          msg += " \\u00b7 e.g. " + names;
+        }
+        configMessage(msg);
+      })
+      .catch(function (err) {
+        configMessage("Error: " + String(err && err.message ? err.message : err));
+      });
+  }
+
   var debugTimer = null;
   var lastMaxDebugId = null;
   var pinnedToBottom = true;
@@ -884,7 +913,8 @@ const DASHBOARD_HTML = `<!doctype html>
 
   document.getElementById("load-lists").addEventListener("click", loadLists);
   document.getElementById("save-config").addEventListener("click", saveConfig);
-  document.getElementById("sync-now").addEventListener("click", syncNow);
+    document.getElementById("sync-now").addEventListener("click", syncNow);
+    document.getElementById("coverage-audit").addEventListener("click", coverageAudit);
   document.getElementById("account-select").addEventListener("change", fillListOptions);
 
   document.getElementById("rows").addEventListener("click", function (event) {

@@ -39,6 +39,19 @@ export interface SerialComplianceDecision {
   description?: string;
 }
 
+// Endpoint IDs of every verified mapping — the coverage audit diffs this set
+// against the recently seen Cortex inventory.
+export async function getMappedEndpointIds(
+  db: D1Database,
+): Promise<Set<string>> {
+  const result = await db
+    .prepare(
+      "SELECT cortex_endpoint_id FROM device_mappings WHERE status = 'verified'",
+    )
+    .all<{ cortex_endpoint_id: string }>();
+  return new Set(result.results.map((row) => row.cortex_endpoint_id));
+}
+
 export async function getStoredEvaluations(
   db: D1Database,
   deviceIds: string[],

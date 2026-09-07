@@ -1,4 +1,8 @@
-import { getEndpointsByHostnames, getEndpointsByIds } from "./cortex";
+import {
+  getEndpointsByHostnames,
+  getEndpointsByIds,
+  getRecentlySeenEndpoints,
+} from "./cortex";
 import {
   listAvailableSerialLists,
   reconcileNoncompliantSerialList,
@@ -6,6 +10,7 @@ import {
 } from "./cloudflare-list";
 import { dashboardPage } from "./dashboard";
 import {
+  coverageSummary,
   evaluateEndpoint,
   findCortexEndpoint,
   normalizeHostname,
@@ -19,6 +24,7 @@ import {
   deleteDevices,
   getAppSettings,
   getAppSettingValues,
+  getMappedEndpointIds,
   getStaleDeviceIds,
   bootstrapAppSettings,
   getDashboardIntegrations,
@@ -114,6 +120,11 @@ export default {
       if (url.pathname === "/api/sync") {
         if (request.method !== "POST") return methodNotAllowed("POST");
         return await postApiSync(env);
+      }
+
+      if (url.pathname === "/api/coverage") {
+        if (request.method !== "POST") return methodNotAllowed("POST");
+        return await postApiCoverage(url, env);
       }
 
       if (url.pathname === "/api/debug-log") {
@@ -1093,6 +1104,48 @@ async function postApiSync(env: Env): Promise<Response> {
     ).catch(() => {});
     throw new ClientError(502, `sync_failed: ${errorMessage(error)}`);
   }
+}
+
+// Diffs the recently seen Cortex inventory against the verified mappings in
+// D1. Uncovered endpoints have no Cloudflare device: they can never be
+// enforced, so they are reported for enrollment instead of being imported.
+async function postApiCoverage(url: URL, env: Env): Promise<Response> {
+  const runtimeEnv = requireRuntimeEnv(env);
+  let windowDays = 30;
+  const windowRaw = url.searchParams.get("windowDays");
+  if (windowRaw !== null) {
+    const parsed = Number(windowRaw);
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 90) {
+      throw new ClientError(400, "invalid_window_days");
+    }
+    windowDays = parsed;
+  }
+
+  const { endpoints, truncated } = await getRecentlySeenEndpoints(
+    runtimeEnv,
+    windowDays,
+  );
+  const mappedEndpointIds = await getMappedEndpointIds(env.DB);
+  const summary = coverageSummary(endpoints, mappedEndpointIds);
+  const uncoveredSample = endpoints
+    .filter((endpoint) => !mappedEndpointIds.has(endpoint.endpoint_id))
+    .slice(0, 100)
+    .map((endpoint) => ({
+      endpoint_id: endpoint.endpoint_id,
+      hostname: endpoint.endpoint_name ?? endpoint.host_name ?? null,
+      operational_status: endpoint.operational_status ?? null,
+      last_seen: endpoint.last_seen ?? null,
+    }));
+
+  return json({
+    scanned: summary.scanned,
+    covered: summary.covered,
+    uncovered: summary.uncovered,
+    coverage_percent: summary.coveragePercent,
+    window_days: windowDays,
+    truncated,
+    uncovered_sample: uncoveredSample,
+  });
 }
 
 async function getApiDebugLog(url: URL, env: Env): Promise<Response> {

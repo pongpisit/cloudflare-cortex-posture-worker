@@ -1,5 +1,6 @@
 import type { CortexEndpoint, RuntimeEnv } from "./types";
 import { appendDebugLog, getAppSettings } from "./repository";
+import { normalizeTimestamp } from "./posture";
 
 interface CortexReply {
   reply?: {
@@ -36,6 +37,61 @@ export async function getEndpointsByIds(
     endpoints.push(...(response.reply?.endpoints ?? []));
   }
   return endpoints;
+}
+
+// Safety ceiling for the coverage audit: 500 pages of 100 endpoints.
+export const MAX_COVERAGE_ENDPOINTS = 50_000;
+
+// Scans the Cortex inventory sorted by last_seen descending and returns every
+// endpoint seen within the window. Stops early once pages fall outside the
+// window, and reports truncation when the safety ceiling is hit instead of
+// paging an unbounded fleet.
+export async function getRecentlySeenEndpoints(
+  env: RuntimeEnv,
+  windowDays: number,
+): Promise<{ endpoints: CortexEndpoint[]; truncated: boolean }> {
+  const cutoff = Date.now() - windowDays * 86_400_000;
+  const collected = new Map<string, CortexEndpoint>();
+  let truncated = false;
+
+  for (let page = 0; page < MAX_COVERAGE_ENDPOINTS / 100; page += 1) {
+    const searchFrom = page * 100;
+    const response = await callCortex(
+      {
+        request_data: {
+          search_from: searchFrom,
+          search_to: searchFrom + 100,
+          sort: { field: "last_seen", keyword: "DESC" },
+        },
+      },
+      env,
+    );
+    const reply = response.reply;
+    const pageEndpoints = reply?.endpoints ?? [];
+    if (pageEndpoints.length === 0) break;
+
+    let outsideWindow = false;
+    for (const endpoint of pageEndpoints) {
+      const seenAt = normalizeTimestamp(endpoint.last_seen);
+      if (seenAt > 0 && seenAt < cutoff) {
+        outsideWindow = true;
+        break;
+      }
+      if (endpoint.endpoint_id && !collected.has(endpoint.endpoint_id)) {
+        if (collected.size >= MAX_COVERAGE_ENDPOINTS) {
+          truncated = true;
+          break;
+        }
+        collected.set(endpoint.endpoint_id, endpoint);
+      }
+    }
+    if (outsideWindow || truncated) break;
+
+    const total = Number(reply?.total_count ?? 0);
+    if (searchFrom + pageEndpoints.length >= total) break;
+  }
+
+  return { endpoints: [...collected.values()], truncated };
 }
 
 export async function getEndpointsByHostnames(
