@@ -137,18 +137,18 @@ All numbers are for the reference fleet — 12,000 devices, 1–5% stale, defaul
 intervals (4-hour detection sweep, 30-minute recovery refresh, 10-minute
 provider polling) — against current Workers Paid plan pricing:
 
-| Dimension | Estimated monthly usage | Included allowance | Overage |
+| Dimension | Estimated monthly usage | Included allowance | Overage rate |
 | --- | --- | --- | --- |
-| Workers requests | ~25–50k | 10M | $0 |
-| Workers CPU time | ~2–5M CPU-ms | 30M | $0 |
-| D1 rows written | ~9–13M | 50M | $0 |
-| D1 rows read | ~50–100M | 25B | $0 |
-| D1 storage | <50 MB | 5 GB | $0 |
-| Queues operations | ~100k | 1M | $0 |
+| Workers requests | ~25–50k | 10M / month | $0.30 per additional million |
+| Workers CPU time | ~2–5M CPU-ms | 30M / month | $0.02 per additional million |
+| D1 rows written | ~9–13M | 50M / month | $1.00 per additional million |
+| D1 rows read | ~50–100M | 25B / month | $0.001 per additional million |
+| D1 storage | <50 MB | 5 GB | $0.75 per GB-month |
+| Queues operations | ~100k | 1M / month | $0.40 per additional million |
 
 **Bottom line: the deployment costs $5/month — the Workers Paid plan itself —
-and every metered dimension stays comfortably inside the included
-allowances.**
+and every metered dimension stays comfortably inside the included allowances,
+so the overage rates above are never charged at the reference fleet size.**
 
 Per-device steady-state formulas for sizing your own fleet:
 
@@ -163,11 +163,11 @@ Scaling notes:
   devices** with default intervals. `DETECTION_REFRESH_MINUTES` scales writes
   linearly: raising it from 4 hours to 24 hours supports proportionally larger
   fleets.
-- The Workers Free plan caps D1 at 100,000 rows written per day, which supports
-  roughly **3,000–4,000 devices** at default intervals. Use it for pilots; use
-  Workers Paid for production fleets. When a free-plan limit is hit, D1 returns
-  errors until the daily reset — the failure model preserves the last published
-  list, but decisions stop updating.
+- The Workers Free plan caps D1 at 100,000 rows written and 5 million rows
+  read per day, which supports roughly **3,000–4,000 devices** at default
+  intervals. Use it for pilots; use Workers Paid for production fleets. When a
+  free-plan limit is hit, D1 returns errors until the daily reset — the
+  failure model preserves the last published list, but decisions stop updating.
 
 Current pricing references: [Workers](https://developers.cloudflare.com/workers/platform/pricing/),
 [D1](https://developers.cloudflare.com/d1/platform/pricing/),
