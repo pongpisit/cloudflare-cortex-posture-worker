@@ -1206,9 +1206,9 @@ function cloudflareApiToken(env: Env): string | null {
 }
 
 function cortexConfigured(env: Env): boolean {
-  return (
-    !!env.CORTEX_BASE_URL && !env.CORTEX_BASE_URL.includes("replace-")
-  );
+  const baseUrl = (env as Env & { CORTEX_BASE_URL?: string })
+    .CORTEX_BASE_URL;
+  return !!baseUrl && !baseUrl.includes("replace-");
 }
 
 function parseSettingsUpdate(body: unknown): Record<string, string> {
