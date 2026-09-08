@@ -1,5 +1,7 @@
 # Cloudflare Cortex XDR Noncompliance List Worker
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/pongpisit/cloudflare-cortex-posture-worker)
+
 This Worker maps Cloudflare Zero Trust devices to Cortex XDR endpoints and
 maintains a Cloudflare Zero Trust serial-number list containing only devices
 whose Cortex security content is too old. Access and Gateway policies use that
@@ -16,8 +18,6 @@ The stale-content threshold defaults to seven days and is managed from the
 operations dashboard, along with every other operational setting. The Worker
 never creates or evaluates policies; it only maintains the list, which you
 attach to policies as a condition.
-
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/pongpisit/cloudflare-cortex-posture-worker)
 
 ## Requirements
 
