@@ -11,9 +11,12 @@ applied on the next Cron run without a redeploy:
 - **Load lists** uses the configured `CLOUDFLARE_API_TOKEN` to list the accounts
   and `SERIAL` lists the token can see, so you pick the target list from a
   dropdown instead of pasting a UUID.
-- **Content age threshold** and **list capacity** set the stale boundary and
-  the capacity safety limit (Zero Trust lists support 1,000 entries on Standard
-  and 5,000 on Enterprise).
+- **Content age threshold** (minutes, hours, or days) and **list capacity**
+  set the stale boundary and the capacity safety limit (Zero Trust lists
+  support 1,000 entries on Standard and 5,000 on Enterprise). Strict
+  environments can go as low as 1 minute; the underlying refresh tiers
+  (`RECOVERY_REFRESH_MINUTES`, default 30) still bound how often content is
+  actually re-checked.
 - **Enable list synchronization** is the master switch for list updates. It
   stays disabled until you turn it on.
 - **Require MAC corroboration** makes discovery refuse hostname-only matches:
@@ -24,22 +27,22 @@ applied on the next Cron run without a redeploy:
   pools have no stable identity, so binding would only churn the mapping
   table while their cloned serials poison the denylist. Matching devices fail
   open with zero writes.
-- **Sync now** runs the list synchronization immediately instead of waiting
-  for the next Cron cycle.
-- **Refresh all from Cortex** queues the Cron-style Cortex refresh for every
-  mapped endpoint at once — a manual pull of the whole fleet's security
-  content into the Worker. Verdicts update within seconds; run **Sync now**
-  (or wait for the next Cron cycle) to publish them to the denylist.
-- **Resync devices from Cloudflare** pulls the enrolled WARP inventory from
-  the Zero Trust Devices API and re-queues discovery for every unmapped
-  device — the recovery path when a mapping was deleted while its device is
-  offline (an online device re-discovers itself on its next poll anyway).
+- **Sync now** is the one action that makes everything correct and
+  up to date: it pulls the Cloudflare device inventory to rebuild any
+  missing bindings (recovering a deleted binding even for an offline
+  device, which a poll alone cannot do), refreshes Cortex content for
+  everything already mapped, and publishes the denylist — all in one call,
+  instead of three separate steps run in the right order.
 - **Coverage audit** scans the Cortex inventory for endpoints seen in the
   last 30 days and reports how many have a Cloudflare device mapped in D1.
-  Uncovered endpoints cannot be enforced until their machines enroll the
-  Cloudflare One Client, so the audit surfaces enrollment gaps rather than
-  importing them. On large fleets it performs one Cortex request per 100
-  endpoints and can take a while.
+  Each uncovered endpoint is diagnosed, not just listed: a hostname that is
+  already mapped under a different `endpoint_id`, or already sitting in the
+  operator queue, is a stale or duplicate Cortex record on a machine that is
+  already enrolled — not a real gap — and the response says so along with
+  the fix (run **Sync now**, or review `GET /api/bindings`). Only a hostname
+  with no Cloudflare device at all is a genuine enrollment gap, and those are
+  reported for enrollment rather than imported. On large fleets the audit
+  performs one Cortex request per 100 endpoints and can take a while.
 
 Each device row has a **Check** button that refreshes that single device from
 Cortex on demand and updates the row with the result. Rows also have
@@ -75,18 +78,18 @@ dashboard page itself stay open.
 | --- | --- |
 | `GET /api/overview` | Integration statuses, device counts, noncompliant serial count, sync state |
 | `GET /api/devices?status=all&limit=N` | Per-device compliance rows; `status=all\|noncompliant\|compliant`, `search=<text>`, `limit` 1–500, default 200 |
-| `POST /api/devices/refresh` | Refresh devices from Cortex immediately: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100; or `{"all": true}` to queue the Cron-style refresh for **every mapped endpoint** (returns `refresh_queued`; verdicts publish on the next list sync) |
-| `POST /api/devices/resync` | Pull the enrolled device inventory from the Cloudflare Zero Trust Devices API and queue discovery for every unmapped, non-excluded, non-revoked device. Rebuilds deleted bindings even while the devices are offline (the provider only reports devices when they poll). Returns `inventory`, `discovery_queued`, `already_mapped`, `excluded`, `skipped_no_hostname`, `revoked_skipped`, `truncated` |
+| `POST /api/sync` | **The one sync action** (what the dashboard's "Sync now" button calls): pulls the Cloudflare device inventory to rebuild any missing bindings, refreshes Cortex content for every mapped endpoint, then publishes the denylist. Each step is best-effort — a Cloudflare or Cortex error is reported under `resync.error` / `refresh.error` rather than blocking the rest. Returns `resync`, `refresh`, `changed`, `count` |
+| `POST /api/devices/refresh` | Advanced primitive behind "Sync now": refresh specific devices from Cortex, `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100; or `{"all": true}` for every mapped endpoint without a Cloudflare resync first |
+| `POST /api/devices/resync` | Advanced primitive behind "Sync now": pull the Cloudflare device inventory and queue discovery for every unmapped, non-excluded, non-revoked device, without also refreshing Cortex content or publishing |
 | `POST /api/devices/delete` | Delete devices from tracking: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100. Devices the provider reported in the last 48 hours are refused with 409 — add `"force": true` to override, since deletion removes their serial from the denylist on the next sync |
-| `POST /api/sync` | Run the list synchronization immediately |
-| `POST /api/coverage?windowDays=30` | Diff the recently seen Cortex inventory against D1 mappings; returns `scanned`, `covered`, `uncovered`, `coverage_percent`, `truncated`, and an `uncovered_sample` of up to 100 endpoints |
+| `POST /api/coverage?windowDays=30` | Diff the recently seen Cortex inventory against D1 mappings; returns `scanned`, `covered`, `uncovered`, `coverage_percent`, `truncated`, and an `uncovered_sample` of up to 100 endpoints, each with a `reason` (`duplicate_of_mapped_hostname`, `queued_for_operator_review`, or `no_cloudflare_device`) and a `fix` describing what to do |
 | `GET /api/bindings` | The operator queue: unbound devices (clone contention, ambiguity, MAC-strict refusals) with candidate Cortex endpoints, drifted bindings, and the serial-integrity report (duplicate, junk, and missing serials) |
 | `POST /api/bindings` | Pin an unbound device to a specific Cortex endpoint permanently: `{"device_id": "...", "endpoint_id": "..."}`. Refuses endpoints actively claimed by a different device (409) |
 | `DELETE /api/bindings` | Release a device entirely (undo a wrong pin, drop a cloned enrollment): `{"device_id": "..."}` — removes the mapping and tombstones the serial for the next sync. Devices reported in the last 48 hours require `"force": true` (409 otherwise) |
 | `GET /api/debug-log?limit=N` | Recent Cortex request/response pairs, `limit` 1–200, default 50 |
 | `DELETE /api/debug-log` | Clear the debug log |
 | `GET /api/settings` | Current operational settings and readiness flags |
-| `PUT /api/settings` | Update settings: `cloudflareAccountId`, `serialListId`, `serialListName`, `listSyncEnabled`, `maxContentAgeDays` (1–365), `listMaxItems` (1–100000), `debugLogEnabled`, `requireMacCorroboration`, `vdiHostnamePatterns` (comma-separated exclusion globs) |
+| `PUT /api/settings` | Update settings: `cloudflareAccountId`, `serialListId`, `serialListName`, `listSyncEnabled`, `maxContentAgeMinutes` (1–525600; whole-day `maxContentAgeDays` still accepted and converted), `listMaxItems` (1–100000), `debugLogEnabled`, `requireMacCorroboration`, `vdiHostnamePatterns` (comma-separated exclusion globs) |
 | `GET /api/cloudflare/lists` | Accounts and `SERIAL` lists visible to the API token |
 
 Settings can also be updated directly:

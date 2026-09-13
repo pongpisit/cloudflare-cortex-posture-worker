@@ -117,9 +117,14 @@ so a transient outage can never remove a device.
 To verify that the enforceable subset covers the whole Cortex fleet, run the
 dashboard's **Coverage audit**: it scans the recently seen Cortex inventory
 (`windowDays`, default 30) and reports endpoints that have no Cloudflare
-device. Uncovered endpoints are enrollment gaps — they are reported, never
-imported, because a serial without a Cloudflare device can never be evaluated
-by a policy.
+device *mapped to that specific endpoint_id*. Each is diagnosed rather than
+lumped together: a hostname already mapped under a different endpoint_id, or
+already sitting in the operator queue, is a stale or duplicate Cortex record
+on an already-enrolled machine (`reason: duplicate_of_mapped_hostname` /
+`queued_for_operator_review`), not a real gap, and the fix is to sync or
+review the queue rather than enroll anything. Only `no_cloudflare_device` is
+a genuine enrollment gap, reported rather than imported, because a serial
+without a Cloudflare device can never be evaluated by a policy.
 
 ## Decision logic
 
@@ -197,7 +202,8 @@ flowchart TD
 ```
 
 - The threshold is the dashboard-managed content age setting
-  (`maxContentAgeDays`, default 7 days).
+  (`maxContentAgeMinutes`, default 10080 minutes / 7 days; settable down to
+  1 minute for strict environments).
 - Content age is measured at the successful Cortex refresh time, so
   wall-clock aging during an outage cannot create a new denial.
 - Only `last_content_update_time` matters. Cortex `operational_status` and
@@ -253,7 +259,11 @@ recorded in the debug log with the authorization redacted.
 The sync validates the configured capacity before writing, skips the PUT when
 nothing changed, re-reads the list after writing to verify, and holds a D1
 lease so overlapping Cron runs cannot interleave replacements. Entries carry
-`hostname=<name>; mac=<address>` descriptions for operators.
+`hostname=<name>; mac=<address>; cf_device_id=<uuid>; cortex_endpoint_id=<id>`
+descriptions, so an operator looking at the SERIAL list in the Zero Trust
+dashboard can jump straight to either platform without cross-referencing D1.
+A genuinely duplicated serial (for example a cloned VM) surfaces every
+colliding id, comma-separated, instead of silently picking one.
 
 ## Data storage
 

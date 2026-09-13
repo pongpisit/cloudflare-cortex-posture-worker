@@ -6,7 +6,7 @@ const env = { CLOUDFLARE_API_TOKEN: "secret-token" };
 const config = {
   cloudflareAccountId: "account-1",
   serialListId: "list-1",
-  maxContentAgeDays: 7,
+  maxContentAgeMs: 7 * 86_400_000,
   listMaxItems: 1000,
 };
 

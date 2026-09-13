@@ -30,9 +30,15 @@ import {
   deleteDevices,
   deleteStaleUnboundDevices,
   deleteUnboundDevices,
+  DEFAULT_CONTENT_AGE_MINUTES,
+  MAX_CONTENT_AGE_MINUTES,
+  MIN_CONTENT_AGE_MINUTES,
   getAppSettings,
   getAppSettingValues,
+  getAllVerifiedDeviceIds,
   getMappedEndpointIds,
+  getMappedHostnames,
+  getUnboundHostnames,
   getStaleDeviceIds,
   bootstrapAppSettings,
   getDashboardIntegrations,
@@ -48,6 +54,7 @@ import {
   listDeviceCompliance,
   listDriftedBindings,
   listUnboundDevices,
+  listUnboundDevicesDueForRetry,
   markMissingEndpoints,
   pinDeviceBinding,
   recordCortexError,
@@ -542,7 +549,8 @@ export default {
     // detected just as well hours later.
     const recoveryMinutes = recoveryRefreshMinutes(env);
     const detectionMinutes = detectionRefreshMinutes(env);
-    const maximumContentAgeDays = settings?.maxContentAgeDays ?? 7;
+    const maximumContentAgeMs =
+      (settings?.maxContentAgeMinutes ?? DEFAULT_CONTENT_AGE_MINUTES) * 60_000;
     const now = Date.now();
     let afterId = "";
     let queued = 0;
@@ -551,7 +559,7 @@ export default {
       while (true) {
         const claim = await claimDueEndpointIds(
           env.DB,
-          maximumContentAgeDays * 86_400_000,
+          maximumContentAgeMs,
           now - recoveryMinutes * 60_000,
           now - detectionMinutes * 60_000,
           afterId,
@@ -579,6 +587,8 @@ export default {
 
     console.log(JSON.stringify({ event: "scheduled_refresh", queued }));
 
+    await cleanupGhostDevices(env, Date.now());
+    await retryUnboundDevices(env, Date.now());
     await runStaleDeviceCleanup(env, Date.now());
   },
 
@@ -624,6 +634,208 @@ function isRefreshMessage(value: unknown): value is RefreshMessage {
     return Array.isArray(candidate.devices);
   }
   return false;
+}
+
+const GHOST_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+// Daily self-heal, Cloudflare side: cross-check every verified mapping
+// against the authoritative Cloudflare device inventory. A mapping whose
+// device_id is not enrolled anymore (revoked, deleted, or replaced by a
+// re-enrollment with a new id - a "ghost") can never poll again, yet it
+// falsely "claims" its endpoint against the clone-contention guard, which
+// blocks the real, current registration from ever binding to it. Aborts
+// without acting if the inventory fetch is incomplete or fails, so a
+// transient Cloudflare API problem can never wipe mappings.
+async function cleanupGhostDevices(env: Env, now: number): Promise<void> {
+  try {
+    const lastCleanup = Number(
+      (await getAppSettingValues(env.DB, ["last_ghost_cleanup_at"])).get(
+        "last_ghost_cleanup_at",
+      ) ?? 0,
+    );
+    if (now - lastCleanup < GHOST_CLEANUP_INTERVAL_MS) return;
+
+    const settings = await getAppSettings(env.DB);
+    if (!settings.cloudflareAccountId) return;
+    const apiToken = cloudflareApiToken(env);
+    if (!apiToken) return;
+
+    const inventory = await listZeroTrustDevices(
+      apiToken,
+      settings.cloudflareAccountId,
+    );
+    if (inventory.truncated) {
+      console.error(
+        JSON.stringify({
+          event: "ghost_cleanup_skipped",
+          reason: "inventory_truncated",
+        }),
+      );
+      return;
+    }
+
+    const validIds = new Set(inventory.devices.map((device) => device.device_id));
+    const mappedIds = await getAllVerifiedDeviceIds(env.DB);
+    const ghosts = mappedIds.filter((id) => !validIds.has(id));
+
+    await saveAppSettings(env.DB, { last_ghost_cleanup_at: String(now) }, now);
+    if (ghosts.length === 0) return;
+
+    const deleted = await deleteDevices(env.DB, ghosts, now);
+    console.log(
+      JSON.stringify({
+        event: "ghost_devices_cleaned",
+        deleted: deleted.length,
+        inventory: inventory.devices.length,
+      }),
+    );
+  } catch (error) {
+    console.error(
+      JSON.stringify({ event: "ghost_cleanup_error", error: errorMessage(error) }),
+    );
+  }
+}
+
+const UNBOUND_RETRY_INTERVAL_MS = 60 * 60 * 1000;
+
+// Hourly self-heal, Cortex side: re-fetch each queued device's CURRENT
+// identity from the authoritative Cloudflare inventory - not the snapshot
+// captured when it first failed to bind - and re-run the exact same
+// resolution ladder used at poll time. A device only binds here when real
+// evidence now exists (a MAC that uniquely matches a Cortex endpoint);
+// otherwise its queue entry is refreshed with the latest known attributes so
+// an operator reviewing it is never looking at stale data.
+async function retryUnboundDevices(env: Env, now: number): Promise<void> {
+  try {
+    const due = await listUnboundDevicesDueForRetry(
+      env.DB,
+      now - UNBOUND_RETRY_INTERVAL_MS,
+      200,
+    );
+    if (due.length === 0) return;
+
+    const settings = await getAppSettings(env.DB);
+    let fresh = new Map<string, CloudflareDevice>();
+    if (settings.cloudflareAccountId) {
+      const apiToken = cloudflareApiToken(env);
+      if (apiToken) {
+        try {
+          const inventory = await listZeroTrustDevices(
+            apiToken,
+            settings.cloudflareAccountId,
+          );
+          fresh = new Map(
+            inventory.devices.map((device) => [device.device_id, device]),
+          );
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "unbound_retry_inventory_error",
+              error: errorMessage(error),
+            }),
+          );
+        }
+      }
+    }
+
+    // A device no longer enrolled at all cannot bind under any evidence -
+    // release it from the queue instead of retrying it forever.
+    const stillEnrolled = (deviceId: string) =>
+      fresh.size === 0 || fresh.has(deviceId);
+    const gone = due.filter(
+      (device) => !stillEnrolled(device.cloudflareDeviceId),
+    );
+    if (gone.length > 0) {
+      await deleteUnboundDevices(
+        env.DB,
+        gone.map((device) => device.cloudflareDeviceId),
+      );
+    }
+
+    const stillQueued = due.filter((device) =>
+      stillEnrolled(device.cloudflareDeviceId),
+    );
+    if (stillQueued.length === 0) return;
+
+    const devices: CloudflareDevice[] = stillQueued.map((device) => {
+      const liveDevice = fresh.get(device.cloudflareDeviceId);
+      if (liveDevice) return liveDevice;
+      // No live inventory to compare against (account not configured, or
+      // the fetch failed this cycle) - retry with the last known attributes,
+      // which still catches a Cortex-side change even without a fresh
+      // Cloudflare read.
+      let mac: string[] | undefined;
+      if (device.macAddress) {
+        try {
+          const parsed: unknown = JSON.parse(device.macAddress);
+          if (Array.isArray(parsed)) mac = parsed as string[];
+        } catch {
+          mac = undefined;
+        }
+      }
+      return {
+        device_id: device.cloudflareDeviceId,
+        hostname: device.hostname,
+        ...(device.serialNumber ? { serial_number: device.serialNumber } : {}),
+        ...(mac ? { mac_address: mac } : {}),
+      };
+    });
+
+    const runtimeEnv = requireRuntimeEnv(env);
+    const observationId = crypto.randomUUID();
+    await saveDeviceObservations(
+      env.DB,
+      devices.map((device) => device.device_id),
+      observationId,
+      now,
+    );
+
+    const outcome = await resolveDeviceBindings(devices, runtimeEnv, settings, now);
+
+    if (outcome.excluded.length > 0) {
+      await deleteUnboundDevices(
+        env.DB,
+        outcome.excluded.map((device) => device.device_id),
+      );
+    }
+    for (const { device, reason } of outcome.failed) {
+      if (reason === "no_match") continue;
+      await upsertUnboundDevice(env.DB, device, reason, now);
+    }
+
+    if (outcome.bindings.length > 0) {
+      await saveDeviceMappings(env.DB, outcome.bindings, observationId, now);
+      await deleteUnboundDevices(
+        env.DB,
+        outcome.bindings.map((entry) => entry.device.device_id),
+      );
+      const matchedEndpoints = [
+        ...new Map(
+          outcome.bindings.map((entry) => [entry.endpoint.endpoint_id, entry.endpoint]),
+        ).values(),
+      ];
+      const maxContentAgeMs = await currentMaxContentAgeMs(env.DB);
+      await persistEvaluatedEndpoints(
+        matchedEndpoints,
+        runtimeEnv,
+        maxContentAgeMs,
+        now,
+      );
+    }
+
+    console.log(
+      JSON.stringify({
+        event: "unbound_devices_retried",
+        checked: stillQueued.length,
+        resolved: outcome.bindings.length,
+        released_not_enrolled: gone.length,
+      }),
+    );
+  } catch (error) {
+    console.error(
+      JSON.stringify({ event: "unbound_retry_error", error: errorMessage(error) }),
+    );
+  }
 }
 
 // Daily hygiene: devices that left the Cloudflare inventory stop being touched
@@ -674,21 +886,140 @@ async function runStaleDeviceCleanup(env: Env, now: number): Promise<void> {
   }
 }
 
+interface FailedResolution {
+  device: CloudflareDevice;
+  reason: string;
+  endpointId?: string;
+}
+
+interface DeviceResolutionResult {
+  bindings: Array<{
+    device: CloudflareDevice;
+    endpoint: CortexEndpoint;
+    method: BindMethod;
+  }>;
+  failed: FailedResolution[];
+  excluded: CloudflareDevice[];
+}
+
+// Shared resolution core for both a live discovery batch and the automated
+// retry of the operator queue: MAC-first ladder, then the clone-contention
+// guard, then in-batch dispute detection. Never guesses - every rejection
+// carries a reason instead of a binding.
+async function resolveDeviceBindings(
+  devices: CloudflareDevice[],
+  env: RuntimeEnv,
+  settings: AppSettings,
+  now: number,
+): Promise<DeviceResolutionResult> {
+  const exclusionPatterns = parseHostnamePatterns(settings.vdiHostnamePatterns);
+  const hostnames = [
+    ...new Set(
+      devices.map((device) => normalizeHostname(device.hostname)).filter(Boolean),
+    ),
+  ];
+  const endpoints =
+    hostnames.length > 0 ? await getEndpointsByHostnames(hostnames, env) : [];
+
+  const resolved: Array<{
+    device: CloudflareDevice;
+    endpoint: CortexEndpoint;
+    method: BindMethod;
+  }> = [];
+  const failed: FailedResolution[] = [];
+  const excluded: CloudflareDevice[] = [];
+
+  for (const device of devices) {
+    if (matchesHostnamePattern(device.hostname, exclusionPatterns)) {
+      excluded.push(device);
+      continue;
+    }
+    const outcome = resolveCortexEndpoint(device, endpoints, now, {
+      requireMac: settings.requireMacCorroboration,
+    });
+    if (outcome.status !== "bound" || !outcome.endpoint || !outcome.method) {
+      failed.push({ device, reason: outcome.status });
+      continue;
+    }
+    resolved.push({ device, endpoint: outcome.endpoint, method: outcome.method });
+  }
+
+  // Clone-contention guard: an endpoint already bound to a different device
+  // that still polls is the signature of a clone (or of an enrollment that
+  // inherited another machine's identity). Never share an endpoint between
+  // two devices - both would inherit one posture. A claim goes stale after
+  // CLAIM_WINDOW_MS so a decommissioned machine eventually releases its
+  // endpoint to a legitimate new enrollment.
+  const CLAIM_WINDOW_MS = 7 * 86_400_000;
+  const candidateIds = [...new Set(resolved.map((r) => r.endpoint.endpoint_id))];
+  const claims = candidateIds.length
+    ? await getVerifiedMappingsByEndpointIds(env.DB, candidateIds)
+    : [];
+  const activeClaims = new Map<string, string[]>();
+  for (const claim of claims) {
+    const lastSeen = claim.lastSeenAt ?? 0;
+    if (now - lastSeen >= CLAIM_WINDOW_MS) continue;
+    const existing = activeClaims.get(claim.cortexEndpointId) ?? [];
+    existing.push(claim.cloudflareDeviceId);
+    activeClaims.set(claim.cortexEndpointId, existing);
+  }
+
+  const mappings: typeof resolved = [];
+  const inBatchClaims = new Map<string, number>();
+  for (const entry of resolved) {
+    const claimants = activeClaims.get(entry.endpoint.endpoint_id) ?? [];
+    const claimedByOther = claimants.some((id) => id !== entry.device.device_id);
+    if (claimedByOther) {
+      failed.push({
+        device: entry.device,
+        reason: "endpoint_claimed_by_active_device",
+        endpointId: entry.endpoint.endpoint_id,
+      });
+      continue;
+    }
+    inBatchClaims.set(
+      entry.endpoint.endpoint_id,
+      (inBatchClaims.get(entry.endpoint.endpoint_id) ?? 0) + 1,
+    );
+    mappings.push(entry);
+  }
+
+  // Two devices in the same batch resolving to one endpoint (twin clones
+  // enrolling together): neither may take it.
+  const disputedIds = new Set(
+    [...inBatchClaims.entries()].filter(([, count]) => count > 1).map(([id]) => id),
+  );
+  const bindings: typeof resolved = [];
+  for (const entry of mappings) {
+    if (disputedIds.has(entry.endpoint.endpoint_id)) {
+      failed.push({
+        device: entry.device,
+        reason: "endpoint_disputed_in_batch",
+        endpointId: entry.endpoint.endpoint_id,
+      });
+      continue;
+    }
+    bindings.push(entry);
+  }
+
+  return { bindings, failed, excluded };
+}
+
 async function processRefreshMessage(
   message: RefreshMessage,
   env: RuntimeEnv,
 ): Promise<boolean> {
-  const maxContentAgeDays = await currentMaxContentAgeDays(env.DB);
+  const maxContentAgeMs = await currentMaxContentAgeMs(env.DB);
 
   if (message.type === "refresh") {
     const endpoints = await getEndpointsByIds(message.endpointIds, env);
     const returnedIds = new Set(endpoints.map((endpoint) => endpoint.endpoint_id));
     const missingIds = message.endpointIds.filter((id) => !returnedIds.has(id));
     const now = Date.now();
-    await persistEvaluatedEndpoints(endpoints, env, maxContentAgeDays, now);
+    await persistEvaluatedEndpoints(endpoints, env, maxContentAgeMs, now);
     await markMissingEndpoints(env.DB, missingIds, now);
     if (missingIds.length > 0) {
-      await rediscoverMissingEndpoints(missingIds, env, maxContentAgeDays, now);
+      await rediscoverMissingEndpoints(missingIds, env, maxContentAgeMs, now);
     }
     if (message.leaseToken) {
       await releaseRefreshLeases(
@@ -727,159 +1058,44 @@ async function processRefreshMessage(
   if (hostnames.length === 0) return false;
 
   const settings = await getAppSettings(env.DB);
-  const exclusionPatterns = parseHostnamePatterns(settings.vdiHostnamePatterns);
-  const endpoints = await getEndpointsByHostnames(hostnames, env);
-  const matched = new Map<string, CortexEndpoint>();
-  const resolved: Array<{
-    device: CloudflareDevice;
-    endpoint: CortexEndpoint;
-    method: BindMethod;
-  }> = [];
   const now = Date.now();
+  const outcome = await resolveDeviceBindings(message.devices, env, settings, now);
 
-  let excludedCount = 0;
-  for (const device of message.devices) {
-    // Messages enqueued before an exclusion pattern was set may still carry
-    // excluded devices; the consumer honors the setting too.
-    if (matchesHostnamePattern(device.hostname, exclusionPatterns)) {
-      excludedCount += 1;
-      continue;
+  for (const { device, reason, endpointId } of outcome.failed) {
+    console.warn(
+      JSON.stringify({
+        event: "device_mapping_failed",
+        cloudflare_device_id: device.device_id,
+        reason,
+        ...(endpointId ? { endpoint_id: endpointId } : {}),
+      }),
+    );
+    // no_match is an enrollment gap (Cortex has never heard of this
+    // hostname) - the coverage audit reports it. Every other failure is
+    // an operator decision waiting to happen, so it is tracked.
+    if (reason !== "no_match") {
+      await upsertUnboundDevice(env.DB, device, reason, now);
     }
-    const outcome = resolveCortexEndpoint(device, endpoints, now, {
-      requireMac: settings.requireMacCorroboration,
-    });
-    if (outcome.status !== "bound" || !outcome.endpoint || !outcome.method) {
-      console.warn(
-        JSON.stringify({
-          event: "device_mapping_failed",
-          cloudflare_device_id: device.device_id,
-          reason: outcome.status,
-        }),
-      );
-      // no_match is an enrollment gap (Cortex has never heard of this
-      // hostname) - the coverage audit reports it. Every other failure is
-      // an operator decision waiting to happen, so it is tracked.
-      if (outcome.status !== "no_match") {
-        await upsertUnboundDevice(env.DB, device, outcome.status, now);
-      }
-      continue;
-    }
-    resolved.push({ device, endpoint: outcome.endpoint, method: outcome.method });
   }
-  if (excludedCount > 0) {
+  if (outcome.excluded.length > 0) {
     console.log(
-      JSON.stringify({ event: "vdi_devices_excluded", devices: excludedCount }),
+      JSON.stringify({ event: "vdi_devices_excluded", devices: outcome.excluded.length }),
     );
   }
 
-  // Clone-contention guard: an endpoint already bound to a different device
-  // that still polls is the signature of a clone (or of an enrollment that
-  // inherited another machine's identity). Never share an endpoint between
-  // two devices - both would inherit one posture. A claim goes stale after
-  // CLAIM_WINDOW_MS so a decommissioned machine eventually releases its
-  // endpoint to a legitimate new enrollment.
-  const CLAIM_WINDOW_MS = 7 * 86_400_000;
-  const candidateIds = [...new Set(resolved.map((r) => r.endpoint.endpoint_id))];
-  const claims = candidateIds.length
-    ? await getVerifiedMappingsByEndpointIds(env.DB, candidateIds)
-    : [];
-  const activeClaims = new Map<string, string[]>();
-  for (const claim of claims) {
-    const lastSeen = claim.lastSeenAt ?? 0;
-    if (now - lastSeen >= CLAIM_WINDOW_MS) continue;
-    const existing = activeClaims.get(claim.cortexEndpointId) ?? [];
-    existing.push(claim.cloudflareDeviceId);
-    activeClaims.set(claim.cortexEndpointId, existing);
-  }
-
-  const mappings: Array<{
-    device: CloudflareDevice;
-    endpoint: CortexEndpoint;
-    method: BindMethod;
-  }> = [];
-  const inBatchClaims = new Map<string, number>();
-  for (const entry of resolved) {
-    const claimants = activeClaims.get(entry.endpoint.endpoint_id) ?? [];
-    const claimedByOther = claimants.some(
-      (id) => id !== entry.device.device_id,
-    );
-    if (claimedByOther) {
-      console.warn(
-        JSON.stringify({
-          event: "device_mapping_failed",
-          cloudflare_device_id: entry.device.device_id,
-          endpoint_id: entry.endpoint.endpoint_id,
-          reason: "endpoint_claimed_by_active_device",
-        }),
-      );
-      await upsertUnboundDevice(
-        env.DB,
-        entry.device,
-        "endpoint_claimed_by_active_device",
-        now,
-      );
-      continue;
-    }
-    inBatchClaims.set(
-      entry.endpoint.endpoint_id,
-      (inBatchClaims.get(entry.endpoint.endpoint_id) ?? 0) + 1,
-    );
-    mappings.push(entry);
-  }
-
-  // Two devices in the same poll resolving to one endpoint (twin clones
-  // enrolling together): neither may take it.
-  const disputedIds = new Set(
-    [...inBatchClaims.entries()]
-      .filter(([, count]) => count > 1)
-      .map(([id]) => id),
-  );
-  const bindings = mappings.filter((entry) => {
-    if (disputedIds.has(entry.endpoint.endpoint_id)) {
-      console.warn(
-        JSON.stringify({
-          event: "device_mapping_failed",
-          cloudflare_device_id: entry.device.device_id,
-          endpoint_id: entry.endpoint.endpoint_id,
-          reason: "endpoint_disputed_in_batch",
-        }),
-      );
-      return false;
-    }
-    return true;
-  });
-
-  for (const entry of bindings) {
-    matched.set(entry.endpoint.endpoint_id, entry.endpoint);
-  }
-
-  // Successfully bound devices leave the operator queue; disputed twins stay
-  // in it together.
-  const disputedDevices = mappings
-    .filter((entry) => disputedIds.has(entry.endpoint.endpoint_id))
-    .map((entry) => entry.device);
-  for (const device of disputedDevices) {
-    await upsertUnboundDevice(
-      env.DB,
-      device,
-      "endpoint_disputed_in_batch",
-      now,
-    );
-  }
-
-  await saveDeviceMappings(env.DB, bindings, observationId, observedAt);
-  if (bindings.length > 0) {
+  await saveDeviceMappings(env.DB, outcome.bindings, observationId, observedAt);
+  if (outcome.bindings.length > 0) {
     await deleteUnboundDevices(
       env.DB,
-      bindings.map((entry) => entry.device.device_id),
+      outcome.bindings.map((entry) => entry.device.device_id),
     );
   }
-  await persistEvaluatedEndpoints(
-    [...matched.values()],
-    env,
-    maxContentAgeDays,
-    now,
-  );
+  const matchedEndpoints = [
+    ...new Map(
+      outcome.bindings.map((entry) => [entry.endpoint.endpoint_id, entry.endpoint]),
+    ).values(),
+  ];
+  await persistEvaluatedEndpoints(matchedEndpoints, env, maxContentAgeMs, now);
   return true;
 }
 
@@ -933,7 +1149,7 @@ const REDISCOVERY_INTERVAL_MS = 60 * 60 * 1000;
 async function rediscoverMissingEndpoints(
   missingIds: string[],
   env: RuntimeEnv,
-  maxContentAgeDays: number,
+  maxContentAgeMs: number,
   now: number,
 ): Promise<void> {
   try {
@@ -1005,7 +1221,7 @@ async function rediscoverMissingEndpoints(
       await persistEvaluatedEndpoints(
         [...found.values()],
         env,
-        maxContentAgeDays,
+        maxContentAgeMs,
         now,
       );
     }
@@ -1027,9 +1243,9 @@ async function rediscoverMissingEndpoints(
   }
 }
 
-async function currentMaxContentAgeDays(db: D1Database): Promise<number> {
+async function currentMaxContentAgeMs(db: D1Database): Promise<number> {
   try {
-    return (await getAppSettings(db)).maxContentAgeDays;
+    return (await getAppSettings(db)).maxContentAgeMinutes * 60_000;
   } catch (error) {
     console.error(
       JSON.stringify({
@@ -1037,14 +1253,14 @@ async function currentMaxContentAgeDays(db: D1Database): Promise<number> {
         error: errorMessage(error),
       }),
     );
-    return 7;
+    return DEFAULT_CONTENT_AGE_MINUTES * 60_000;
   }
 }
 
 async function persistEvaluatedEndpoints(
   endpoints: CortexEndpoint[],
   env: RuntimeEnv,
-  maxContentAgeDays: number,
+  maxContentAgeMs: number,
   now = Date.now(),
 ): Promise<void> {
   const evaluations = new Map<string, Evaluation>();
@@ -1055,7 +1271,7 @@ async function persistEvaluatedEndpoints(
       evaluateEndpoint(
         endpoint,
         now,
-        maxContentAgeDays,
+        maxContentAgeMs,
       ),
     );
   }
@@ -1129,7 +1345,7 @@ async function getHealth(db: D1Database): Promise<Response> {
 async function getApiOverview(env: Env): Promise<Response> {
   const now = Date.now();
   const settings = await getAppSettings(env.DB);
-  const maximumAgeDays = settings.maxContentAgeDays;
+  const maximumAgeMs = settings.maxContentAgeMinutes * 60_000;
   const refreshMinutes = recoveryRefreshMinutes(env);
   const [integrations, devices, decisions, providerValues, unboundCount] =
     await Promise.all([
@@ -1137,7 +1353,7 @@ async function getApiOverview(env: Env): Promise<Response> {
       getDeviceCounts(env.DB),
       getSerialComplianceDecisions(
         env.DB,
-        maximumAgeDays * 86_400_000,
+        maximumAgeMs,
         now - refreshMinutes * 2 * 60_000,
       ),
       getAppSettingValues(env.DB, ["last_check_at"]),
@@ -1146,7 +1362,7 @@ async function getApiOverview(env: Env): Promise<Response> {
   const providerLastCheckAt = Number(providerValues.get("last_check_at") ?? 0);
   return json({
     generated_at: now,
-    maximum_content_age_days: maximumAgeDays,
+    maximum_content_age_minutes: settings.maxContentAgeMinutes,
     provider: {
       last_check_at: providerLastCheckAt || null,
       stale: !providerLastCheckAt || now - providerLastCheckAt > 30 * 60_000,
@@ -1191,7 +1407,7 @@ async function getApiDevices(url: URL, env: Env): Promise<Response> {
   const settings = await getAppSettings(env.DB);
   const devices = await listDeviceCompliance(
     env.DB,
-    settings.maxContentAgeDays * 86_400_000,
+    settings.maxContentAgeMinutes * 60_000,
     statusParam,
     limit,
     search || undefined,
@@ -1239,6 +1455,46 @@ async function getCloudflareLists(env: Env): Promise<Response> {
   }
 }
 
+interface RefreshAllSummary {
+  mode: "sync" | "async";
+  refreshedEndpoints: number;
+  refreshQueued: number;
+}
+
+// Refreshes Cortex content for every currently mapped endpoint. Fleets at or
+// under SYNC_REFRESH_ALL_LIMIT are refreshed inline; larger fleets fall back
+// to the same queue Cron uses. Never publishes on its own - callers decide
+// when to sync, so a caller doing more work first (like a full Cloudflare
+// resync) can publish once at the end instead of twice.
+async function refreshMappedEndpointsCore(env: Env): Promise<RefreshAllSummary> {
+  const endpointIds = [...(await getMappedEndpointIds(env.DB))];
+  if (endpointIds.length === 0) {
+    return { mode: "sync", refreshedEndpoints: 0, refreshQueued: 0 };
+  }
+
+  if (endpointIds.length <= SYNC_REFRESH_ALL_LIMIT) {
+    const runtimeEnv = requireRuntimeEnv(env);
+    let endpoints: CortexEndpoint[] = [];
+    try {
+      endpoints = await getEndpointsByIds(endpointIds, runtimeEnv);
+    } catch (error) {
+      await recordCortexError(env.DB, errorMessage(error), Date.now()).catch(
+        () => {},
+      );
+      throw error;
+    }
+    if (endpoints.length > 0) {
+      const maxContentAgeMs = await currentMaxContentAgeMs(env.DB);
+      await persistEvaluatedEndpoints(endpoints, runtimeEnv, maxContentAgeMs);
+      await recordCortexSuccess(env.DB, Date.now()).catch(() => {});
+    }
+    return { mode: "sync", refreshedEndpoints: endpoints.length, refreshQueued: 0 };
+  }
+
+  await enqueueRefreshes(env.REFRESH_QUEUE, endpointIds);
+  return { mode: "async", refreshedEndpoints: 0, refreshQueued: endpointIds.length };
+}
+
 async function postApiDeviceRefresh(
   request: Request,
   env: Env,
@@ -1251,62 +1507,39 @@ async function postApiDeviceRefresh(
     }
     if (!body.all) throw new ClientError(400, "device_id_required");
 
-    const endpointIds = [...(await getMappedEndpointIds(env.DB))];
-    if (endpointIds.length === 0) {
-      return json({ mode: "sync", refreshed_endpoints: 0, synced: false });
-    }
-
-    // Small enough to refresh inline and publish immediately. Larger fleets
-    // fall back to the queue below, since a single request cannot reliably
-    // page through thousands of Cortex calls.
-    if (endpointIds.length <= SYNC_REFRESH_ALL_LIMIT) {
-      const runtimeEnv = requireRuntimeEnv(env);
-      let endpoints: CortexEndpoint[] = [];
-      try {
-        endpoints = await getEndpointsByIds(endpointIds, runtimeEnv);
-      } catch (error) {
-        await recordCortexError(env.DB, errorMessage(error), Date.now()).catch(
-          () => {},
-        );
-        throw error;
-      }
-      if (endpoints.length > 0) {
-        const maxContentAgeDays = await currentMaxContentAgeDays(env.DB);
-        await persistEvaluatedEndpoints(endpoints, runtimeEnv, maxContentAgeDays);
-        await recordCortexSuccess(env.DB, Date.now()).catch(() => {});
-      }
-
+    const refresh = await refreshMappedEndpointsCore(env);
+    let sync = {
+      attempted: false,
+      changed: false,
+      count: null as number | null,
+      error: null as string | null,
+    };
+    if (refresh.mode === "sync") {
       const settings = await getAppSettings(env.DB);
-      const sync = await attemptListSync(env, settings);
-      console.log(
-        JSON.stringify({
-          event: "manual_cortex_refresh_all",
-          mode: "sync",
-          endpoints: endpoints.length,
-          synced: sync.attempted && !sync.error,
-        }),
-      );
-      return json({
-        mode: "sync",
-        refreshed_endpoints: endpoints.length,
-        synced: sync.attempted && !sync.error,
-        changed: sync.changed,
-        count: sync.count,
-        sync_error: sync.error,
-      });
+      sync = await attemptListSync(env, settings);
     }
-
-    await enqueueRefreshes(env.REFRESH_QUEUE, endpointIds);
     console.log(
       JSON.stringify({
-        event: "manual_cortex_refresh_queued",
-        endpoints: endpointIds.length,
+        event:
+          refresh.mode === "sync"
+            ? "manual_cortex_refresh_all"
+            : "manual_cortex_refresh_queued",
+        mode: refresh.mode,
+        endpoints:
+          refresh.mode === "sync"
+            ? refresh.refreshedEndpoints
+            : refresh.refreshQueued,
+        synced: sync.attempted && !sync.error,
       }),
     );
     return json({
-      mode: "async",
-      refresh_queued: endpointIds.length,
-      synced: false,
+      mode: refresh.mode,
+      refreshed_endpoints: refresh.refreshedEndpoints,
+      refresh_queued: refresh.refreshQueued,
+      synced: sync.attempted && !sync.error,
+      changed: sync.changed,
+      count: sync.count,
+      sync_error: sync.error,
     });
   }
   let deviceIds: string[];
@@ -1367,18 +1600,18 @@ async function postApiDeviceRefresh(
       else endpointNotFound.push(deviceId);
     }
     if (endpoints.length > 0) {
-      const maxContentAgeDays = await currentMaxContentAgeDays(env.DB);
+      const maxContentAgeMs = await currentMaxContentAgeMs(env.DB);
       await persistEvaluatedEndpoints(
         endpoints,
         runtimeEnv,
-        maxContentAgeDays,
+        maxContentAgeMs,
       );
       await recordCortexSuccess(env.DB, Date.now()).catch(() => {});
     }
   }
 
   const settings = await getAppSettings(env.DB);
-  const maximumContentAge = settings.maxContentAgeDays * 86_400_000;
+  const maximumContentAge = settings.maxContentAgeMinutes * 60_000;
   const devices: DeviceCompliance[] = [];
   for (const deviceId of refreshedDeviceIds) {
     const device = await getDeviceComplianceByDeviceId(
@@ -1459,18 +1692,38 @@ async function postApiDeviceDelete(
   return json({ deleted: deleted.length, notFound });
 }
 
+interface ResyncSummary {
+  inventory: number;
+  alreadyMapped: number;
+  revokedSkipped: number;
+  excluded: number;
+  skippedNoHostname: number;
+  discoveryQueued: number;
+  truncated: boolean;
+}
+
 // Rebuild missing bindings from the Cloudflare Zero Trust device inventory.
 // The provider only reports devices when they poll, so a mapping deleted
 // while its device is offline can never come back through /check. This pulls
 // the enrolled inventory directly and feeds every unmapped, non-excluded
-// device through the same discovery queue a poll would use.
-async function postApiDevicesResync(env: Env): Promise<Response> {
-  const settings = await getAppSettings(env.DB);
-  if (!settings.cloudflareAccountId) {
-    throw new ClientError(400, "cloudflare_account_not_configured");
-  }
+// device through the same discovery queue a poll would use. Returns an
+// all-zero summary rather than throwing when the account is not configured,
+// so a caller doing more than just this step can proceed regardless.
+async function resyncFromCloudflareCore(
+  env: Env,
+  settings: AppSettings,
+): Promise<ResyncSummary> {
+  const empty: ResyncSummary = {
+    inventory: 0,
+    alreadyMapped: 0,
+    revokedSkipped: 0,
+    excluded: 0,
+    skippedNoHostname: 0,
+    discoveryQueued: 0,
+    truncated: false,
+  };
   const apiToken = cloudflareApiToken(env);
-  if (!apiToken) throw new ClientError(400, "cloudflare_api_token_missing");
+  if (!settings.cloudflareAccountId || !apiToken) return empty;
 
   const inventory = await listZeroTrustDevices(
     apiToken,
@@ -1522,22 +1775,41 @@ async function postApiDevicesResync(env: Env): Promise<Response> {
     );
   }
 
+  return {
+    inventory: inventory.devices.length,
+    alreadyMapped: mapped.size,
+    revokedSkipped: inventory.revoked,
+    excluded,
+    skippedNoHostname,
+    discoveryQueued: toDiscover.length,
+    truncated: inventory.truncated,
+  };
+}
+
+async function postApiDevicesResync(env: Env): Promise<Response> {
+  const settings = await getAppSettings(env.DB);
+  if (!settings.cloudflareAccountId) {
+    throw new ClientError(400, "cloudflare_account_not_configured");
+  }
+  if (!cloudflareApiToken(env)) {
+    throw new ClientError(400, "cloudflare_api_token_missing");
+  }
+  const summary = await resyncFromCloudflareCore(env, settings);
   console.log(
     JSON.stringify({
       event: "manual_cloudflare_resync",
-      inventory: inventory.devices.length,
-      queued: toDiscover.length,
+      inventory: summary.inventory,
+      queued: summary.discoveryQueued,
     }),
   );
-
   return json({
-    inventory: inventory.devices.length,
-    already_mapped: mapped.size,
-    revoked_skipped: inventory.revoked,
-    excluded,
-    skipped_no_hostname: skippedNoHostname,
-    discovery_queued: toDiscover.length,
-    truncated: inventory.truncated,
+    inventory: summary.inventory,
+    already_mapped: summary.alreadyMapped,
+    revoked_skipped: summary.revokedSkipped,
+    excluded: summary.excluded,
+    skipped_no_hostname: summary.skippedNoHostname,
+    discovery_queued: summary.discoveryQueued,
+    truncated: summary.truncated,
   });
 }
 
@@ -1584,6 +1856,12 @@ async function attemptListSync(
   }
 }
 
+// The one comprehensive "make everything correct and up to date" action:
+// rebuild any missing bindings from the Cloudflare inventory, refresh Cortex
+// content for everything already mapped, then publish. Each step is
+// best-effort on its own (a Cloudflare or Cortex hiccup is reported but
+// never blocks the next step), so the final publish always reflects the
+// most current state the Worker could gather in this one call.
 async function postApiSync(env: Env): Promise<Response> {
   const settings = await getAppSettings(env.DB);
   if (!settings.listSyncEnabled) {
@@ -1592,6 +1870,50 @@ async function postApiSync(env: Env): Promise<Response> {
   if (!settings.cloudflareAccountId || !settings.serialListId) {
     throw new ClientError(400, "list_not_configured");
   }
+
+  let resync: ResyncSummary;
+  let resyncError: string | null = null;
+  try {
+    resync = await resyncFromCloudflareCore(env, settings);
+  } catch (error) {
+    resyncError = errorMessage(error);
+    resync = {
+      inventory: 0,
+      alreadyMapped: 0,
+      revokedSkipped: 0,
+      excluded: 0,
+      skippedNoHostname: 0,
+      discoveryQueued: 0,
+      truncated: false,
+    };
+  }
+  console.log(
+    JSON.stringify({
+      event: "manual_cloudflare_resync",
+      inventory: resync.inventory,
+      queued: resync.discoveryQueued,
+      error: resyncError,
+    }),
+  );
+
+  let refresh: RefreshAllSummary;
+  let refreshError: string | null = null;
+  try {
+    refresh = await refreshMappedEndpointsCore(env);
+  } catch (error) {
+    refreshError = errorMessage(error);
+    refresh = { mode: "sync", refreshedEndpoints: 0, refreshQueued: 0 };
+  }
+  console.log(
+    JSON.stringify({
+      event: "manual_cortex_refresh_all",
+      mode: refresh.mode,
+      endpoints:
+        refresh.mode === "sync" ? refresh.refreshedEndpoints : refresh.refreshQueued,
+      error: refreshError,
+    }),
+  );
+
   const result = await attemptListSync(env, settings);
   if (result.error === "sync_already_running") {
     throw new ClientError(409, "sync_already_running");
@@ -1599,12 +1921,36 @@ async function postApiSync(env: Env): Promise<Response> {
   if (result.error) {
     throw new ClientError(502, `sync_failed: ${result.error}`);
   }
-  return json({ changed: result.changed, count: result.count });
+  return json({
+    resync: {
+      inventory: resync.inventory,
+      already_mapped: resync.alreadyMapped,
+      revoked_skipped: resync.revokedSkipped,
+      excluded: resync.excluded,
+      skipped_no_hostname: resync.skippedNoHostname,
+      discovery_queued: resync.discoveryQueued,
+      truncated: resync.truncated,
+      error: resyncError,
+    },
+    refresh: {
+      mode: refresh.mode,
+      refreshed_endpoints: refresh.refreshedEndpoints,
+      refresh_queued: refresh.refreshQueued,
+      error: refreshError,
+    },
+    changed: result.changed,
+    count: result.count,
+  });
 }
 
 // Diffs the recently seen Cortex inventory against the verified mappings in
 // D1. Uncovered endpoints have no Cloudflare device: they can never be
 // enforced, so they are reported for enrollment instead of being imported.
+// Each uncovered entry is also diagnosed: a hostname that is already mapped
+// (under a different endpoint_id) or already queued for an operator
+// decision is a stale/duplicate Cortex record on an already-enrolled
+// machine, not a genuine enrollment gap - reporting both the same way would
+// send an operator chasing an enrollment that already exists.
 async function postApiCoverage(url: URL, env: Env): Promise<Response> {
   const runtimeEnv = requireRuntimeEnv(env);
   let windowDays = 30;
@@ -1621,17 +1967,44 @@ async function postApiCoverage(url: URL, env: Env): Promise<Response> {
     runtimeEnv,
     windowDays,
   );
-  const mappedEndpointIds = await getMappedEndpointIds(env.DB);
+  const [mappedEndpointIds, mappedHostnames, unboundHostnames] =
+    await Promise.all([
+      getMappedEndpointIds(env.DB),
+      getMappedHostnames(env.DB),
+      getUnboundHostnames(env.DB),
+    ]);
   const summary = coverageSummary(endpoints, mappedEndpointIds);
   const uncoveredSample = endpoints
     .filter((endpoint) => !mappedEndpointIds.has(endpoint.endpoint_id))
     .slice(0, 100)
-    .map((endpoint) => ({
-      endpoint_id: endpoint.endpoint_id,
-      hostname: endpoint.endpoint_name ?? endpoint.host_name ?? null,
-      operational_status: endpoint.operational_status ?? null,
-      last_seen: endpoint.last_seen ?? null,
-    }));
+    .map((endpoint) => {
+      const hostname = normalizeHostname(
+        endpoint.endpoint_name ?? endpoint.host_name,
+      );
+      let reason: string;
+      let fix: string;
+      if (hostname && mappedHostnames.has(hostname)) {
+        reason = "duplicate_of_mapped_hostname";
+        fix =
+          "A Cloudflare device with this hostname is already mapped under a different Cortex endpoint_id - a stale or reinstalled agent record, not a missing enrollment. Run Sync now; a live poll resolves to the current endpoint automatically.";
+      } else if (hostname && unboundHostnames.has(hostname)) {
+        reason = "queued_for_operator_review";
+        fix =
+          "A device with this hostname is already waiting in the operator queue. Review it with GET /api/bindings.";
+      } else {
+        reason = "no_cloudflare_device";
+        fix =
+          "No Cloudflare device with this hostname is mapped or queued. Verify the Cloudflare One Client is installed and enrolled on this machine, and that its reported hostname matches.";
+      }
+      return {
+        endpoint_id: endpoint.endpoint_id,
+        hostname: endpoint.endpoint_name ?? endpoint.host_name ?? null,
+        operational_status: endpoint.operational_status ?? null,
+        last_seen: endpoint.last_seen ?? null,
+        reason,
+        fix,
+      };
+    });
 
   return json({
     scanned: summary.scanned,
@@ -1832,7 +2205,7 @@ async function synchronizeList(
     const result = await reconcileNoncompliantSerialList(env, {
       cloudflareAccountId: settings.cloudflareAccountId,
       serialListId: settings.serialListId,
-      maxContentAgeDays: settings.maxContentAgeDays,
+      maxContentAgeMs: settings.maxContentAgeMinutes * 60_000,
       listMaxItems: settings.listMaxItems,
     });
     await recordListSyncSuccess(env.DB, result.count, Date.now());
@@ -1961,15 +2334,25 @@ function parseSettingsUpdate(body: unknown): Record<string, string> {
     }
     updates.vdi_hostname_patterns = patterns.join(",");
   }
-  if (body.maxContentAgeDays !== undefined) {
-    updates.max_content_age_days = String(
+  if (body.maxContentAgeMinutes !== undefined) {
+    updates.max_content_age_minutes = String(
       settingsInt(
-        body.maxContentAgeDays,
-        1,
-        365,
-        "invalid_max_content_age_days",
+        body.maxContentAgeMinutes,
+        MIN_CONTENT_AGE_MINUTES,
+        MAX_CONTENT_AGE_MINUTES,
+        "invalid_max_content_age_minutes",
       ),
     );
+  } else if (body.maxContentAgeDays !== undefined) {
+    // Legacy whole-day input, still accepted for existing callers: convert
+    // to the canonical minutes value on write.
+    const days = settingsInt(
+      body.maxContentAgeDays,
+      1,
+      365,
+      "invalid_max_content_age_days",
+    );
+    updates.max_content_age_minutes = String(days * 1440);
   }
   if (body.listMaxItems !== undefined) {
     updates.list_max_items = String(

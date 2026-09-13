@@ -37,6 +37,8 @@ interface SerialDecisionRow {
   noncompliant: number;
   hostname: string | null;
   verified_mac: string | null;
+  cloudflare_device_id: string | null;
+  cortex_endpoint_id: string | null;
 }
 
 export interface SerialComplianceDecision {
@@ -56,6 +58,27 @@ export async function getMappedEndpointIds(
     )
     .all<{ cortex_endpoint_id: string }>();
   return new Set(result.results.map((row) => row.cortex_endpoint_id));
+}
+
+// Every hostname already bound to a verified mapping. Lets the coverage
+// audit tell "this uncovered endpoint is a duplicate/stale Cortex record for
+// an already-enrolled machine" apart from a genuine enrollment gap.
+export async function getMappedHostnames(db: D1Database): Promise<Set<string>> {
+  const result = await db
+    .prepare(
+      "SELECT DISTINCT hostname FROM device_mappings WHERE status = 'verified'",
+    )
+    .all<{ hostname: string }>();
+  return new Set(result.results.map((row) => row.hostname));
+}
+
+// Every hostname already waiting in the operator queue. Lets the coverage
+// audit point at GET /api/bindings instead of reporting the same gap twice.
+export async function getUnboundHostnames(db: D1Database): Promise<Set<string>> {
+  const result = await db
+    .prepare("SELECT DISTINCT hostname FROM unbound_devices")
+    .all<{ hostname: string }>();
+  return new Set(result.results.map((row) => row.hostname));
 }
 
 export async function getStoredEvaluations(
@@ -211,6 +234,26 @@ export async function getStaleDeviceIds(
   return result.results.map((row) => row.cloudflare_device_id);
 }
 
+// Every verified device_id, for cross-checking against the authoritative
+// Cloudflare device inventory. A mapping whose device_id is not in that
+// inventory is a ghost - the registration was revoked or replaced - and its
+// endpoint should be released rather than left falsely "claimed".
+export async function getAllVerifiedDeviceIds(
+  db: D1Database,
+  limit = 20_000,
+): Promise<string[]> {
+  const result = await db
+    .prepare(
+      `SELECT cloudflare_device_id FROM device_mappings
+       WHERE status = 'verified'
+       ORDER BY cloudflare_device_id
+       LIMIT ?`,
+    )
+    .bind(limit)
+    .all<{ cloudflare_device_id: string }>();
+  return result.results.map((row) => row.cloudflare_device_id);
+}
+
 export async function getAppSettingValues(
   db: D1Database,
   names: string[],
@@ -329,8 +372,10 @@ export async function getSerialComplianceDecisions(
                   AND s.last_content_update_time < s.cortex_refreshed_at - ? THEN 1
                 ELSE 0
               END) AS noncompliant,
-              MAX(m.hostname) AS hostname,
-              MAX(m.verified_mac) AS verified_mac
+              GROUP_CONCAT(DISTINCT m.hostname) AS hostname,
+              GROUP_CONCAT(DISTINCT m.verified_mac) AS verified_mac,
+              GROUP_CONCAT(DISTINCT m.cloudflare_device_id) AS cloudflare_device_id,
+              GROUP_CONCAT(DISTINCT m.cortex_endpoint_id) AS cortex_endpoint_id
        FROM device_mappings m
        LEFT JOIN endpoint_snapshots s
          ON s.cortex_endpoint_id = m.cortex_endpoint_id
@@ -342,7 +387,8 @@ export async function getSerialComplianceDecisions(
           AND MIN(s.cortex_refreshed_at) >= ?
        UNION ALL
        SELECT r.serial_number, 0 AS noncompliant,
-              NULL AS hostname, NULL AS verified_mac
+              NULL AS hostname, NULL AS verified_mac,
+              NULL AS cloudflare_device_id, NULL AS cortex_endpoint_id
        FROM serial_removals r
        WHERE NOT EXISTS (
          SELECT 1 FROM device_mappings m
@@ -356,8 +402,18 @@ export async function getSerialComplianceDecisions(
   return result.results.map((row) => ({
     serialNumber: row.serial_number,
     noncompliant: row.noncompliant === 1,
-    ...(row.hostname || row.verified_mac
-      ? { description: deviceDescription(row.hostname, row.verified_mac) }
+    ...(row.hostname ||
+    row.verified_mac ||
+    row.cloudflare_device_id ||
+    row.cortex_endpoint_id
+      ? {
+          description: deviceDescription(
+            row.hostname,
+            row.verified_mac,
+            row.cloudflare_device_id,
+            row.cortex_endpoint_id,
+          ),
+        }
       : {}),
   }));
 }
@@ -719,6 +775,35 @@ export async function listUnboundDevices(
   }));
 }
 
+// Devices whose last binding attempt is old enough to retry. Oldest first,
+// so a persistently stuck device does not starve newer arrivals of a check.
+export async function listUnboundDevicesDueForRetry(
+  db: D1Database,
+  cutoff: number,
+  limit = 200,
+): Promise<UnboundDevice[]> {
+  const result = await db
+    .prepare(
+      `SELECT cloudflare_device_id, hostname, serial_number, mac_address,
+              last_attempt_at, attempts, last_reason
+       FROM unbound_devices
+       WHERE last_attempt_at <= ?
+       ORDER BY last_attempt_at ASC
+       LIMIT ?`,
+    )
+    .bind(cutoff, limit)
+    .all<UnboundRow>();
+  return result.results.map((row) => ({
+    cloudflareDeviceId: row.cloudflare_device_id,
+    hostname: row.hostname,
+    serialNumber: row.serial_number,
+    macAddress: row.mac_address,
+    lastAttemptAt: row.last_attempt_at,
+    attempts: row.attempts,
+    lastReason: row.last_reason,
+  }));
+}
+
 export async function getUnboundDevice(
   db: D1Database,
   deviceId: string,
@@ -1063,7 +1148,7 @@ export interface AppSettings {
   serialListId: string | null;
   serialListName: string | null;
   listSyncEnabled: boolean;
-  maxContentAgeDays: number;
+  maxContentAgeMinutes: number;
   listMaxItems: number;
   debugLogEnabled: boolean;
   requireMacCorroboration: boolean;
@@ -1075,11 +1160,18 @@ interface AppSettingRow {
   value: string;
 }
 
+// 1 minute to 365 days, so the threshold can express "content must be under
+// 30 minutes old" for strict environments as well as multi-day windows.
+export const MIN_CONTENT_AGE_MINUTES = 1;
+export const MAX_CONTENT_AGE_MINUTES = 365 * 24 * 60;
+export const DEFAULT_CONTENT_AGE_MINUTES = 7 * 24 * 60;
+
 const APP_SETTING_KEYS = [
   "cloudflare_account_id",
   "serial_list_id",
   "serial_list_name",
   "list_sync_enabled",
+  "max_content_age_minutes",
   "max_content_age_days",
   "list_max_items",
   "debug_log_enabled",
@@ -1096,16 +1188,24 @@ export async function getAppSettings(db: D1Database): Promise<AppSettings> {
     .bind(...APP_SETTING_KEYS)
     .all<AppSettingRow>();
   const values = new Map(result.results.map((row) => [row.name, row.value]));
+  // Migration: deployments that never set the new minutes-based key still
+  // have the legacy whole-day value. Convert it as the fallback so existing
+  // thresholds are preserved exactly until the setting is next saved.
+  const legacyDays = Number(values.get("max_content_age_days"));
+  const legacyFallbackMinutes =
+    Number.isFinite(legacyDays) && legacyDays > 0
+      ? legacyDays * 1440
+      : DEFAULT_CONTENT_AGE_MINUTES;
   return {
     cloudflareAccountId: values.get("cloudflare_account_id") || null,
     serialListId: values.get("serial_list_id") || null,
     serialListName: values.get("serial_list_name") || null,
     listSyncEnabled: values.get("list_sync_enabled") === "true",
-    maxContentAgeDays: settingInt(
-      values.get("max_content_age_days"),
-      1,
-      365,
-      7,
+    maxContentAgeMinutes: settingInt(
+      values.get("max_content_age_minutes"),
+      MIN_CONTENT_AGE_MINUTES,
+      MAX_CONTENT_AGE_MINUTES,
+      legacyFallbackMinutes,
     ),
     listMaxItems: settingInt(values.get("list_max_items"), 1, 100_000, 1000),
     debugLogEnabled: values.get("debug_log_enabled") !== "false",
@@ -1189,16 +1289,29 @@ function chunk<T>(values: T[], size: number): T[][] {
   return result;
 }
 
+// Builds the Zero Trust list item description. Includes both platforms'
+// identifiers - the Cloudflare device_id and the Cortex (PANW) endpoint_id -
+// so an operator looking at the SERIAL list in the Zero Trust dashboard can
+// jump straight to either system without cross-referencing D1. Fields use
+// GROUP_CONCAT upstream, so a genuinely duplicated serial (a cloned VM, for
+// example) surfaces every colliding id here instead of silently picking one.
 function deviceDescription(
   hostname: string | null,
   normalizedMac: string | null,
+  cloudflareDeviceId: string | null,
+  cortexEndpointId: string | null,
 ): string {
   const parts: string[] = [];
   if (hostname) parts.push(`hostname=${hostname}`);
   if (normalizedMac) {
-    const mac = normalizedMac.match(/.{2}/g)?.join(":") ?? normalizedMac;
+    const mac = normalizedMac
+      .split(",")
+      .map((value) => value.match(/.{2}/g)?.join(":") ?? value)
+      .join(",");
     parts.push(`mac=${mac}`);
   }
+  if (cloudflareDeviceId) parts.push(`cf_device_id=${cloudflareDeviceId}`);
+  if (cortexEndpointId) parts.push(`cortex_endpoint_id=${cortexEndpointId}`);
   return parts.join("; ");
 }
 

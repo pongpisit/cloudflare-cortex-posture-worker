@@ -8,7 +8,7 @@ import type {
 export function evaluateEndpoint(
   endpoint: CortexEndpoint | null,
   now: number,
-  maxContentAgeDays: number,
+  maxContentAgeMs: number,
 ): Evaluation {
   if (!endpoint) {
     return { score: 0, reason: "endpoint_not_found_or_ambiguous" };
@@ -25,7 +25,7 @@ export function evaluateEndpoint(
   if (contentAge < 0) {
     return { score: 0, reason: "last_content_update_in_future" };
   }
-  if (contentAge > maxContentAgeDays * 86_400_000) {
+  if (contentAge > maxContentAgeMs) {
     return { score: 0, reason: "content_older_than_allowed" };
   }
 

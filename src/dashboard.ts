@@ -173,8 +173,15 @@ const DASHBOARD_HTML = `<!doctype html>
         <select id="list-select" disabled><option value="">Load lists first</option></select>
       </div>
       <div class="config-field">
-        <label for="threshold">Content age threshold (days)</label>
-        <input id="threshold" type="number" min="1" max="365" value="7">
+        <label for="threshold">Content age threshold</label>
+        <div style="display:flex; gap:6px;">
+          <input id="threshold" type="number" min="1" max="525600" value="7" style="flex:1;">
+          <select id="threshold-unit" style="flex:0 0 auto; width:auto;">
+            <option value="1">minutes</option>
+            <option value="60">hours</option>
+            <option value="1440" selected>days</option>
+          </select>
+        </div>
       </div>
       <div class="config-field">
         <label for="capacity">List capacity</label>
@@ -196,8 +203,6 @@ const DASHBOARD_HTML = `<!doctype html>
       <div class="config-actions">
         <button type="button" id="load-lists">Load lists</button>
         <button type="button" id="sync-now">Sync now</button>
-        <button type="button" id="refresh-all">Refresh all from Cortex</button>
-        <button type="button" id="resync-devices">Resync devices from Cloudflare</button>
         <button type="button" id="coverage-audit">Coverage audit</button>
         <button type="button" id="save-config" class="primary">Save configuration</button>
       </div>
@@ -334,8 +339,8 @@ const DASHBOARD_HTML = `<!doctype html>
     });
 
     document.getElementById("subtitle").textContent =
-      "Threshold: content older than " + o.maximum_content_age_days +
-      " days is noncompliant \\u00b7 updated " + new Date(o.generated_at).toLocaleString();
+      "Threshold: content older than " + formatDuration(o.maximum_content_age_minutes) +
+      " is noncompliant \\u00b7 updated " + new Date(o.generated_at).toLocaleString();
     document.getElementById("topbar-note").textContent =
       o.noncompliant_serials + " noncompliant \\u00b7 " +
       (o.list_sync && o.list_sync.ready ? "list sync ready" : "list sync not ready");
@@ -415,11 +420,35 @@ const DASHBOARD_HTML = `<!doctype html>
     document.getElementById("config-message").textContent = text;
   }
 
+  // Displays a minutes value in the largest whole unit it divides evenly
+  // into, so a stored value of 10080 shows as "7 days" rather than "10080
+  // minutes".
+  function setThresholdDisplay(minutes) {
+    minutes = Number(minutes) || 0;
+    var value = minutes, unit = "1";
+    if (minutes !== 0 && minutes % 1440 === 0) {
+      value = minutes / 1440;
+      unit = "1440";
+    } else if (minutes !== 0 && minutes % 60 === 0) {
+      value = minutes / 60;
+      unit = "60";
+    }
+    document.getElementById("threshold").value = value;
+    document.getElementById("threshold-unit").value = unit;
+  }
+
+  function formatDuration(minutes) {
+    minutes = Number(minutes) || 0;
+    if (minutes !== 0 && minutes % 1440 === 0) return (minutes / 1440) + " day(s)";
+    if (minutes !== 0 && minutes % 60 === 0) return (minutes / 60) + " hour(s)";
+    return minutes + " minute(s)";
+  }
+
   function renderSettings(payload) {
     var s = payload.settings || {};
     currentAccountId = s.cloudflareAccountId || "";
     currentListId = s.serialListId || "";
-    document.getElementById("threshold").value = s.maxContentAgeDays;
+    setThresholdDisplay(s.maxContentAgeMinutes);
     document.getElementById("capacity").value = s.listMaxItems;
     document.getElementById("sync-enabled").checked = !!s.listSyncEnabled;
     document.getElementById("debug-log-enabled").checked = s.debugLogEnabled !== false;
@@ -531,15 +560,17 @@ const DASHBOARD_HTML = `<!doctype html>
   function saveConfig() {
     var accountSelect = document.getElementById("account-select");
     var listSelect = document.getElementById("list-select");
+    var thresholdValue = parseInt(document.getElementById("threshold").value, 10);
+    var thresholdUnit = parseInt(document.getElementById("threshold-unit").value, 10);
     var body = {
-      maxContentAgeDays: parseInt(document.getElementById("threshold").value, 10),
+      maxContentAgeMinutes: thresholdValue * thresholdUnit,
       listMaxItems: parseInt(document.getElementById("capacity").value, 10),
       listSyncEnabled: document.getElementById("sync-enabled").checked,
       debugLogEnabled: document.getElementById("debug-log-enabled").checked,
       requireMacCorroboration: document.getElementById("require-mac").checked,
       vdiHostnamePatterns: document.getElementById("vdi-patterns").value
     };
-    if (isNaN(body.maxContentAgeDays) || isNaN(body.listMaxItems)) {
+    if (isNaN(body.maxContentAgeMinutes) || isNaN(body.listMaxItems)) {
       configMessage("Threshold and capacity must be numbers.");
       return;
     }
@@ -573,78 +604,31 @@ const DASHBOARD_HTML = `<!doctype html>
       });
   }
 
+  // The one sync action: rebuilds anything missing from the Cloudflare
+  // inventory, refreshes Cortex content for everything already mapped, then
+  // publishes the denylist - all in one call.
   function syncNow() {
-    configMessage("Syncing\\u2026");
+    configMessage("Syncing\\u2026 pulling Cloudflare inventory and refreshing Cortex content");
     mutatingFetch("/api/sync", { method: "POST", headers: { accept: "application/json" } })
       .then(function (r) {
         if (!r.ok) throw new Error("sync failed (" + r.status + ")");
         return r.json();
       })
       .then(function (payload) {
-        configMessage(
-          "Sync complete \\u00b7 changed=" + payload.changed + " \\u00b7 count=" + payload.count
-        );
-        refresh();
-      })
-      .catch(function (err) {
-        configMessage("Error: " + String(err && err.message ? err.message : err));
-      });
-  }
-
-  function refreshAllFromCortex() {
-    configMessage("Refreshing all devices from Cortex\\u2026");
-    mutatingFetch("/api/devices/refresh", {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({ all: true })
-    })
-      .then(function (r) {
-        if (!r.ok) throw new Error("refresh failed (" + r.status + ")");
-        return r.json();
-      })
-      .then(function (payload) {
-        var message;
-        if (payload.mode === "async") {
-          message =
-            "Queued " + payload.refresh_queued + " endpoint(s) for Cortex refresh \\u00b7 verdicts publish on the next sync";
-        } else {
-          message = "Refreshed " + payload.refreshed_endpoints + " endpoint(s)";
-          if (payload.synced) {
-            message += " \\u00b7 synced now \\u00b7 changed=" + payload.changed + " \\u00b7 count=" + payload.count;
-          } else if (payload.sync_error) {
-            message += " \\u00b7 sync failed: " + payload.sync_error;
-          } else {
-            message += " \\u00b7 list sync is not enabled";
-          }
+        var message = "Synced \\u00b7 changed=" + payload.changed + " \\u00b7 count=" + payload.count;
+        if (payload.resync) {
+          message += " \\u00b7 Cloudflare: " + payload.resync.inventory + " device(s), " +
+            payload.resync.discovery_queued + " queued for discovery";
+          if (payload.resync.error) message += " (resync error: " + payload.resync.error + ")";
+        }
+        if (payload.refresh) {
+          message += " \\u00b7 Cortex: " +
+            (payload.refresh.mode === "async"
+              ? payload.refresh.refresh_queued + " endpoint(s) queued"
+              : payload.refresh.refreshed_endpoints + " endpoint(s) refreshed");
+          if (payload.refresh.error) message += " (refresh error: " + payload.refresh.error + ")";
         }
         configMessage(message);
-        refresh();
-      })
-      .catch(function (err) {
-        configMessage("Error: " + String(err && err.message ? err.message : err));
-      });
-  }
-
-  function resyncDevices() {
-    configMessage("Pulling the Cloudflare device inventory\\u2026");
-    mutatingFetch("/api/devices/resync", {
-      method: "POST",
-      headers: { accept: "application/json", "content-type": "application/json" }
-    })
-      .then(function (r) {
-        if (!r.ok) throw new Error("resync failed (" + r.status + ")");
-        return r.json();
-      })
-      .then(function (payload) {
-        configMessage(
-          "Inventory " + payload.inventory +
-            " \\u00b7 queued " + payload.discovery_queued +
-            " for discovery \\u00b7 already mapped " + payload.already_mapped +
-            (payload.revoked_skipped ? " \\u00b7 revoked skipped " + payload.revoked_skipped : "")
-        );
         refresh();
       })
       .catch(function (err) {
@@ -666,12 +650,29 @@ const DASHBOARD_HTML = `<!doctype html>
           " recent Cortex endpoints have a Cloudflare device (" + pct + ")" +
           " \\u00b7 " + payload.uncovered + " uncovered";
         if (payload.truncated) msg += " \\u00b7 scan truncated at 50000-endpoint safety limit";
-        if (payload.uncovered_sample && payload.uncovered_sample.length > 0) {
-          var names = payload.uncovered_sample
-            .slice(0, 5)
-            .map(function (e) { return e.hostname || e.endpoint_id; })
-            .join(", ");
-          msg += " \\u00b7 e.g. " + names;
+        var sample = payload.uncovered_sample || [];
+        if (sample.length > 0) {
+          var labels = {
+            duplicate_of_mapped_hostname: "stale/duplicate Cortex record on an already-enrolled machine",
+            queued_for_operator_review: "already queued for review",
+            no_cloudflare_device: "no Cloudflare device enrolled with this hostname"
+          };
+          var byReason = {};
+          var firstFixByReason = {};
+          sample.forEach(function (e) {
+            var key = e.reason || "no_cloudflare_device";
+            byReason[key] = (byReason[key] || 0) + 1;
+            if (!firstFixByReason[key] && e.fix) firstFixByReason[key] = e.fix;
+          });
+          var parts = [];
+          for (var key in byReason) {
+            parts.push(byReason[key] + " " + (labels[key] || key));
+          }
+          msg += " \\u00b7 " + parts.join(", ");
+          for (var fixKey in firstFixByReason) {
+            msg += " \\u00b7 fix: " + firstFixByReason[fixKey];
+            break;
+          }
         }
         configMessage(msg);
       })
@@ -1039,8 +1040,6 @@ const DASHBOARD_HTML = `<!doctype html>
   document.getElementById("load-lists").addEventListener("click", loadLists);
   document.getElementById("save-config").addEventListener("click", saveConfig);
     document.getElementById("sync-now").addEventListener("click", syncNow);
-    document.getElementById("refresh-all").addEventListener("click", refreshAllFromCortex);
-    document.getElementById("resync-devices").addEventListener("click", resyncDevices);
     document.getElementById("coverage-audit").addEventListener("click", coverageAudit);
   document.getElementById("account-select").addEventListener("change", fillListOptions);
 

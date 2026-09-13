@@ -31,7 +31,12 @@ structured events include:
 - `device_delete_rejected`
 - `scheduled_refresh`
 - `manual_cortex_refresh_queued`
+- `manual_cortex_refresh_all`
 - `manual_cloudflare_resync`
+- `ghost_devices_cleaned`
+- `ghost_cleanup_error`
+- `unbound_devices_retried`
+- `unbound_retry_error`
 - `cortex_refresh_error`
 
 The Worker refuses to update when the desired count exceeds the configured list
@@ -88,17 +93,29 @@ handled:
   Cortex agent is reinstalled (see
   [endpoint identity over time](../README.md#endpoint-identity-over-time)),
   so re-imaged fleets require no manual reconciliation.
-- **A deleted binding recovers on the next poll — or immediately via resync.**
-  A device that is online re-discovers itself the next time the provider
-  polls. A device that is offline cannot: the provider only reports devices
-  when they poll. **Resync devices from Cloudflare** (or
-  `POST /api/devices/resync`) pulls the enrolled WARP inventory from the
-  Zero Trust Devices API and re-queues discovery for every unmapped device,
-  so deleted bindings rebuild even while the machines are off. Discovery
-  then applies the normal ladder: MAC corroboration, contention guard,
-  operator queue — a duplicate WARP registration of the same machine lands
-  in the queue for an operator decision instead of silently sharing an
+- **A deleted binding recovers on the next poll — or immediately via Sync
+  now.** A device that is online re-discovers itself the next time the
+  provider polls. A device that is offline cannot: the provider only reports
+  devices when they poll. **Sync now** (or `POST /api/sync`) pulls the
+  enrolled WARP inventory from the Zero Trust Devices API and re-queues
+  discovery for every unmapped device as its first step, so deleted bindings
+  rebuild even while the machines are off. Discovery then applies the normal
+  ladder: MAC corroboration, contention guard, operator queue — a duplicate
+  WARP registration of the same machine lands in the queue for an operator
+  decision instead of silently sharing an
   endpoint.
+- **Two automated jobs self-heal without an operator, on every Cron tick.**
+  Ghost cleanup (daily, gated) cross-checks every verified mapping against
+  the live Cloudflare device inventory; a mapping whose device_id is no
+  longer enrolled (revoked, deleted, or replaced by a re-enrollment) is
+  released automatically, which frees its endpoint for the real, current
+  registration to bind. It aborts without acting if the inventory fetch is
+  incomplete, so a transient Cloudflare API problem can never wipe mappings.
+  Unbound-queue retry (hourly per device) re-fetches each queued device's
+  current MAC from Cloudflare — not the stale snapshot from when it first
+  failed to bind — and re-runs the same resolution ladder; a device only
+  binds when real evidence now exists (a MAC that uniquely matches a Cortex
+  endpoint), never a guess.
 - **Binding decisions that need a human land in one place.** Clone contentions
   (two devices claiming one Cortex endpoint), ambiguous twin hostnames, and
   MAC-strict refusals are recorded in the `unbound_devices` queue; identity
@@ -139,7 +156,7 @@ Dashboard-managed settings (stored in D1, with defaults):
 | --- | --- | --- |
 | Cloudflare account | unset | Account that owns the managed list |
 | Serial list | unset | Zero Trust SERIAL list to manage |
-| Content age threshold | `7` days | Stale-content boundary; use `14` for two weeks |
+| Content age threshold | `10080` minutes (7 days) | Stale-content boundary. Settable in minutes, hours, or days from the dashboard (as low as 1 minute for strict environments); `PUT /api/settings` takes `maxContentAgeMinutes` directly, or the legacy whole-day `maxContentAgeDays` |
 | List capacity | `1000` | Safety limit; `5000` on Enterprise entitlements |
 | List synchronization | disabled | Master switch for list updates |
 | Cortex traffic logging | enabled | Store recent Cortex request/response pairs for the debug panel |

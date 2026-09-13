@@ -17,10 +17,11 @@ is kept in a verified MAC set. The hardware serial number is never used for
 matching; it is only the enforcement key written to the denylist, and it
 follows the device automatically if it changes.
 
-The stale-content threshold defaults to seven days and is managed from the
-operations dashboard, along with every other operational setting. The Worker
-never creates or evaluates policies; it only maintains the list, which you
-attach to policies as a condition.
+The stale-content threshold defaults to seven days, is settable down to the
+minute for strict environments, and is managed from the operations
+dashboard, along with every other operational setting. The Worker never
+creates or evaluates policies; it only maintains the list, which you attach
+to policies as a condition.
 
 ## Requirements
 
@@ -120,9 +121,13 @@ enforced by a SERIAL list, so they are surfaced rather than silently
 mis-enforced. Machines that should never bind at all — non-persistent VDI
 pools, for instance — can be excluded by hostname pattern so they fail open
 without churning the mapping table. A deleted binding self-heals on the
-device's next poll, or immediately via **Resync devices from Cloudflare**,
-which pulls the enrolled WARP inventory and re-queues discovery — restoring
-even offline devices, which the provider cannot report.
+device's next poll, or immediately via **Sync now**, which pulls the
+enrolled WARP inventory and re-queues discovery before refreshing and
+publishing — restoring even offline devices, which the provider cannot
+report. Two automated jobs run this same self-healing on Cron without an
+operator: a daily check releases mappings for devices no longer enrolled in
+Cloudflare, and an hourly retry re-checks anything stuck in the operator
+queue against the latest Cloudflare and Cortex data.
 
 For every periodic mechanism and its cadence — how the D1 inventory stays
 current without a nightly bulk import — see the

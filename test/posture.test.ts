@@ -348,7 +348,7 @@ describe("coverage summary", () => {
 
 describe("posture evaluation", () => {
   it("passes protected endpoints with content under seven days", () => {
-    expect(evaluateEndpoint(endpoint(), now, 7)).toEqual({
+    expect(evaluateEndpoint(endpoint(), now, 7 * 86_400_000)).toEqual({
       score: 100,
       reason: "content_fresh",
     });
@@ -359,7 +359,7 @@ describe("posture evaluation", () => {
       evaluateEndpoint(
         endpoint({ last_content_update_time: now - 8 * 86_400_000 }),
         now,
-        7,
+        7 * 86_400_000,
       ),
     ).toEqual({ score: 0, reason: "content_older_than_allowed" });
   });
@@ -369,7 +369,24 @@ describe("posture evaluation", () => {
       evaluateEndpoint(
         endpoint({ operational_status: "unprotected" }),
         now,
-        7,
+        7 * 86_400_000,
+      ),
+    ).toEqual({ score: 100, reason: "content_fresh" });
+  });
+
+  it("supports sub-day thresholds down to minutes", () => {
+    expect(
+      evaluateEndpoint(
+        endpoint({ last_content_update_time: now - 45 * 60_000 }),
+        now,
+        30 * 60_000,
+      ),
+    ).toEqual({ score: 0, reason: "content_older_than_allowed" });
+    expect(
+      evaluateEndpoint(
+        endpoint({ last_content_update_time: now - 20 * 60_000 }),
+        now,
+        30 * 60_000,
       ),
     ).toEqual({ score: 100, reason: "content_fresh" });
   });

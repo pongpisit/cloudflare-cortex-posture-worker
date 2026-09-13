@@ -92,7 +92,7 @@ describe("dashboard repository", () => {
       serialListId: null,
       serialListName: null,
       listSyncEnabled: false,
-      maxContentAgeDays: 7,
+      maxContentAgeMinutes: 10_080,
       listMaxItems: 1000,
       debugLogEnabled: true,
       requireMacCorroboration: false,
@@ -100,7 +100,7 @@ describe("dashboard repository", () => {
     });
   });
 
-  it("maps stored app settings and ignores out-of-range values", async () => {
+  it("migrates the legacy whole-day threshold to minutes when unset", async () => {
     const db = fakeDb([
       { name: "cloudflare_account_id", value: "aa8ab6fe5b7f906df426a972033e922a" },
       { name: "serial_list_id", value: "6e9d70bf-68d7-4f45-9091-814b141ee656" },
@@ -117,11 +117,21 @@ describe("dashboard repository", () => {
       serialListId: "6e9d70bf-68d7-4f45-9091-814b141ee656",
       serialListName: "Cortex noncompliant devices",
       listSyncEnabled: true,
-      maxContentAgeDays: 14,
+      maxContentAgeMinutes: 20_160,
       listMaxItems: 5000,
       debugLogEnabled: false,
       requireMacCorroboration: true,
       vdiHostnamePatterns: "vdi-*,pooled-*",
+    });
+  });
+
+  it("prefers the canonical minutes threshold over the legacy day value", async () => {
+    const db = fakeDb([
+      { name: "max_content_age_minutes", value: "45" },
+      { name: "max_content_age_days", value: "14" },
+    ]);
+    await expect(getAppSettings(db)).resolves.toMatchObject({
+      maxContentAgeMinutes: 45,
     });
   });
 

@@ -38,7 +38,7 @@ export interface SerialListEnv {
 export interface SerialListSyncConfig {
   cloudflareAccountId: string;
   serialListId: string;
-  maxContentAgeDays: number;
+  maxContentAgeMs: number;
   listMaxItems: number;
 }
 
@@ -72,7 +72,7 @@ export async function reconcileNoncompliantSerialList(
   now = Date.now(),
 ): Promise<SerialListSyncResult> {
   requireConfiguration(env, config);
-  const maximumAge = config.maxContentAgeDays * 86_400_000;
+  const maximumAge = config.maxContentAgeMs;
   // Decision freshness keys off the recovery tier: denylist members are
   // refreshed at that cadence, so their add/remove decisions are always
   // produced, while fleet-wide sweeps are only needed for detection.
