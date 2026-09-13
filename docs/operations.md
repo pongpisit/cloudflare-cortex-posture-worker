@@ -85,6 +85,20 @@ handled:
   Cortex agent is reinstalled (see
   [endpoint identity over time](../README.md#endpoint-identity-over-time)),
   so re-imaged fleets require no manual reconciliation.
+- **Binding decisions that need a human land in one place.** Clone contentions
+  (two devices claiming one Cortex endpoint), ambiguous twin hostnames, and
+  MAC-strict refusals are recorded in the `unbound_devices` queue; identity
+  drift (renames, NIC swaps) is flagged on the binding. Review both with
+  `GET /api/bindings`, then pin the correct endpoint with
+  `POST /api/bindings` (permanent, immune to hostname and MAC churn) or
+  release a wrong enrollment with `DELETE /api/bindings`. Queued devices age
+  out with the same 30-day cleanup as departed devices.
+- **Watch the serial-integrity report.** Enforcement depends entirely on the
+  serial Cloudflare reports — Cortex has none. Cloned VMs commonly share a
+  serial or carry OEM junk (`Default string`, `System Serial Number`), and
+  every such device is unenforceable no matter how good the mapping is. The
+  `serial_integrity` block of `GET /api/bindings` lists duplicate, junk, and
+  missing serials; fix them in the VM configuration or the MDM inventory.
 - **Monitoring:** point an external uptime monitor at `GET /health` and review
   the dashboard periodically. All state lives in D1 and every operational
   decision is visible as a structured log event.

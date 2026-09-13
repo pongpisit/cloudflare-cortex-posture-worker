@@ -174,6 +174,16 @@ flowchart TD
    instead of binding hostname-only matches — check the method counts first
    to see how many bindings would be affected.
 
+**Future upgrade — endpoint alias stamping.** The Cortex `get_endpoint` API
+supports filtering by `alias` (verified against the tenant), `alias` is empty
+across this fleet, and it exposes no hardware serial or BIOS UUID at all. A
+future version can therefore stamp `alias = <cloudflare device_id>` on the
+matched endpoint at discovery and re-verify by that exact key, eliminating
+hostname from re-verification entirely. The alias lives on the Cortex
+*endpoint* record, so a clone registering as a new endpoint never inherits
+it — making alias mismatch a clone detector in its own right. Requires a
+Cortex API key with write scope; not implemented in this version.
+
 ### Compliance decision (per refreshed endpoint)
 
 ```mermaid

@@ -9,6 +9,7 @@ import {
   normalizeMacCollection,
   normalizeTimestamp,
   parseVerifiedMacs,
+  isJunkSerial,
   resolveCortexEndpoint,
 } from "../src/posture";
 import type { CloudflareDevice, CortexEndpoint } from "../src/types";
@@ -151,6 +152,24 @@ describe("binding identity drift", () => {
       needsMacsUnion(new Set<string>(), normalizeMacCollection([MAC_B])),
     ).toBe(true);
     expect(needsMacsUnion(setA, normalizeMacCollection(undefined))).toBe(false);
+  });
+});
+
+describe("serial integrity", () => {
+  it("flags OEM junk and placeholder serials", () => {
+    expect(isJunkSerial("Default String")).toBe(true);
+    expect(isJunkSerial(" System Serial Number ")).toBe(true);
+    expect(isJunkSerial("To Be Filled By O.E.M.")).toBe(true);
+    expect(isJunkSerial("none")).toBe(true);
+    expect(isJunkSerial("0000000")).toBe(true);
+    expect(isJunkSerial("000")).toBe(true);
+    expect(isJunkSerial(null)).toBe(true);
+  });
+
+  it("accepts real serials", () => {
+    expect(isJunkSerial("VMware-56 4d 4a e5 a7 53 b9 01")).toBe(false);
+    expect(isJunkSerial("C02XK1QGJG5H")).toBe(false);
+    expect(isJunkSerial("JD4NX12345")).toBe(false);
   });
 });
 

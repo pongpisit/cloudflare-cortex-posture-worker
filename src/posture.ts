@@ -222,6 +222,35 @@ export function parseVerifiedMacs(
   return result;
 }
 
+// Values OEMs and cloning tools leave in the serial field when no real
+// hardware serial exists. Such a serial can never uniquely identify a device,
+// and duplicates across clones poison the SERIAL denylist.
+const JUNK_SERIALS = new Set([
+  "default string",
+  "system serial number",
+  "serial number",
+  "to be filled by o.e.m.",
+  "to be filled by oem",
+  "none",
+  "null",
+  "unknown",
+  "empty",
+  "not specified",
+  "not available",
+  "no serial number",
+  "chasis serial number",
+  "chassis serial number",
+]);
+
+export function isJunkSerial(value: unknown): boolean {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (normalized.length < 4) return true;
+  if (/^0+$/.test(normalized)) return true;
+  return JUNK_SERIALS.has(normalized);
+}
+
 export interface CoverageSummary {
   scanned: number;
   covered: number;

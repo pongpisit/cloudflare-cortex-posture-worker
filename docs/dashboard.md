@@ -58,6 +58,9 @@ dashboard page itself stay open.
 | `POST /api/devices/delete` | Delete devices from tracking: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100 |
 | `POST /api/sync` | Run the list synchronization immediately |
 | `POST /api/coverage?windowDays=30` | Diff the recently seen Cortex inventory against D1 mappings; returns `scanned`, `covered`, `uncovered`, `coverage_percent`, `truncated`, and an `uncovered_sample` of up to 100 endpoints |
+| `GET /api/bindings` | The operator queue: unbound devices (clone contention, ambiguity, MAC-strict refusals) with candidate Cortex endpoints, drifted bindings, and the serial-integrity report (duplicate, junk, and missing serials) |
+| `POST /api/bindings` | Pin an unbound device to a specific Cortex endpoint permanently: `{"device_id": "...", "endpoint_id": "..."}`. Refuses endpoints actively claimed by a different device (409) |
+| `DELETE /api/bindings` | Release a device entirely (undo a wrong pin, drop a cloned enrollment): `{"device_id": "..."}` — removes the mapping and tombstones the serial for the next sync |
 | `GET /api/debug-log?limit=N` | Recent Cortex request/response pairs, `limit` 1–200, default 50 |
 | `DELETE /api/debug-log` | Clear the debug log |
 | `GET /api/settings` | Current operational settings and readiness flags |

@@ -79,7 +79,7 @@ describe("schema bootstrap", () => {
       statements.some((sql) => sql.startsWith("INSERT OR IGNORE INTO d1_migrations")),
     ).toBe(true);
     const migrationBind = bound.find(
-      (values) => values.length === 13 && values.every((v) => typeof v === "string"),
+      (values) => values.length === 14 && values.every((v) => typeof v === "string"),
     );
     expect(migrationBind).toEqual([
       "0001_initial",
@@ -95,6 +95,7 @@ describe("schema bootstrap", () => {
       "0011_device_last_seen",
       "0012_mapping_identity",
       "0013_bind_method",
+      "0014_unbound_devices",
     ]);
     expect(
       statements.filter((sql) => sql.includes("INSERT OR IGNORE INTO integration_status"))

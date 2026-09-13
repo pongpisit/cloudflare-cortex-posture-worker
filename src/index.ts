@@ -23,7 +23,10 @@ import {
   claimDueEndpointIds,
   claimSyncLease,
   clearDebugLog,
+  countUnboundDevices,
   deleteDevices,
+  deleteStaleUnboundDevices,
+  deleteUnboundDevices,
   getAppSettings,
   getAppSettingValues,
   getMappedEndpointIds,
@@ -35,11 +38,15 @@ import {
   getDeviceMappingsByDeviceIds,
   getSerialComplianceDecisions,
   getStoredEvaluations,
+  getUnboundDevice,
   getVerifiedMappingsByEndpointIds,
   invalidateDeviceMappings,
   listDebugLog,
   listDeviceCompliance,
+  listDriftedBindings,
+  listUnboundDevices,
   markMissingEndpoints,
+  pinDeviceBinding,
   recordCortexError,
   recordCortexSuccess,
   recordListSyncError,
@@ -47,6 +54,7 @@ import {
   releaseRefreshLeases,
   releaseSyncLease,
   markRediscoveryAttempted,
+  serialIntegrity,
   updateMappingEndpoint,
   saveAppSettings,
   saveDeviceObservations,
@@ -56,6 +64,7 @@ import {
   touchMappingDrift,
   updateVerifiedDeviceSerials,
   updateVerifiedMacs,
+  upsertUnboundDevice,
 } from "./repository";
 import type { AppSettings, DeviceCompliance } from "./repository";
 import type {
@@ -143,6 +152,17 @@ export default {
       if (url.pathname === "/api/coverage") {
         if (request.method !== "POST") return methodNotAllowed("POST");
         return await postApiCoverage(url, env);
+      }
+
+      if (url.pathname === "/api/bindings") {
+        if (request.method === "GET") return await getApiBindings(env);
+        if (request.method === "POST") {
+          return await postApiBindings(request, env);
+        }
+        if (request.method === "DELETE") {
+          return await deleteApiBindings(request, env);
+        }
+        return methodNotAllowed("GET, POST, DELETE");
       }
 
       if (url.pathname === "/api/debug-log") {
@@ -571,6 +591,7 @@ async function runStaleDeviceCleanup(env: Env, now: number): Promise<void> {
     );
     const staleBefore = now - staleDays * 86_400_000;
     const staleIds = await getStaleDeviceIds(env.DB, staleBefore, 1000);
+    await deleteStaleUnboundDevices(env.DB, staleBefore);
     await saveAppSettings(
       env.DB,
       { last_stale_cleanup_at: String(now) },
@@ -669,6 +690,12 @@ async function processRefreshMessage(
           reason: outcome.status,
         }),
       );
+      // no_match is an enrollment gap (Cortex has never heard of this
+      // hostname) - the coverage audit reports it. Every other failure is
+      // an operator decision waiting to happen, so it is tracked.
+      if (outcome.status !== "no_match") {
+        await upsertUnboundDevice(env.DB, device, outcome.status, now);
+      }
       continue;
     }
     resolved.push({ device, endpoint: outcome.endpoint, method: outcome.method });
@@ -714,6 +741,12 @@ async function processRefreshMessage(
           reason: "endpoint_claimed_by_active_device",
         }),
       );
+      await upsertUnboundDevice(
+        env.DB,
+        entry.device,
+        "endpoint_claimed_by_active_device",
+        now,
+      );
       continue;
     }
     inBatchClaims.set(
@@ -749,7 +782,27 @@ async function processRefreshMessage(
     matched.set(entry.endpoint.endpoint_id, entry.endpoint);
   }
 
+  // Successfully bound devices leave the operator queue; disputed twins stay
+  // in it together.
+  const disputedDevices = mappings
+    .filter((entry) => disputedIds.has(entry.endpoint.endpoint_id))
+    .map((entry) => entry.device);
+  for (const device of disputedDevices) {
+    await upsertUnboundDevice(
+      env.DB,
+      device,
+      "endpoint_disputed_in_batch",
+      now,
+    );
+  }
+
   await saveDeviceMappings(env.DB, bindings, observationId, observedAt);
+  if (bindings.length > 0) {
+    await deleteUnboundDevices(
+      env.DB,
+      bindings.map((entry) => entry.device.device_id),
+    );
+  }
   await persistEvaluatedEndpoints(
     [...matched.values()],
     env,
@@ -1007,16 +1060,18 @@ async function getApiOverview(env: Env): Promise<Response> {
   const settings = await getAppSettings(env.DB);
   const maximumAgeDays = settings.maxContentAgeDays;
   const refreshMinutes = recoveryRefreshMinutes(env);
-  const [integrations, devices, decisions, providerValues] = await Promise.all([
-    getDashboardIntegrations(env.DB),
-    getDeviceCounts(env.DB),
-    getSerialComplianceDecisions(
-      env.DB,
-      maximumAgeDays * 86_400_000,
-      now - refreshMinutes * 2 * 60_000,
-    ),
-    getAppSettingValues(env.DB, ["last_check_at"]),
-  ]);
+  const [integrations, devices, decisions, providerValues, unboundCount] =
+    await Promise.all([
+      getDashboardIntegrations(env.DB),
+      getDeviceCounts(env.DB),
+      getSerialComplianceDecisions(
+        env.DB,
+        maximumAgeDays * 86_400_000,
+        now - refreshMinutes * 2 * 60_000,
+      ),
+      getAppSettingValues(env.DB, ["last_check_at"]),
+      countUnboundDevices(env.DB),
+    ]);
   const providerLastCheckAt = Number(providerValues.get("last_check_at") ?? 0);
   return json({
     generated_at: now,
@@ -1036,7 +1091,7 @@ async function getApiOverview(env: Env): Promise<Response> {
       list_name: settings.serialListName,
     },
     integrations,
-    devices,
+    devices: { ...devices, unbound: unboundCount },
     noncompliant_serials: decisions.filter((decision) => decision.noncompliant)
       .length,
   });
@@ -1303,6 +1358,148 @@ async function postApiCoverage(url: URL, env: Env): Promise<Response> {
     truncated,
     uncovered_sample: uncoveredSample,
   });
+}
+
+// Operator queue for binding decisions: devices whose automated resolution
+// failed (clone contention, ambiguity, MAC-strict refusals), bindings whose
+// identity evidence drifted, and the serial integrity report. Read-only.
+async function getApiBindings(env: Env): Promise<Response> {
+  const [unbound, drifted, integrity] = await Promise.all([
+    listUnboundDevices(env.DB, 50),
+    listDriftedBindings(env.DB, 100),
+    serialIntegrity(env.DB),
+  ]);
+
+  const candidatesByDevice = new Map<
+    string,
+    Array<Record<string, unknown>>
+  >();
+  let candidatesError: string | null = null;
+  if (unbound.length > 0) {
+    try {
+      const runtimeEnv = requireRuntimeEnv(env);
+      const hostnames = [
+        ...new Set(unbound.map((device) => device.hostname).filter(Boolean)),
+      ];
+      const endpoints = await getEndpointsByHostnames(hostnames, runtimeEnv);
+      const claims = await getVerifiedMappingsByEndpointIds(
+        env.DB,
+        endpoints.map((endpoint) => endpoint.endpoint_id),
+      );
+      const claimByEndpoint = new Map(
+        claims.map((claim) => [claim.cortexEndpointId, claim]),
+      );
+      for (const device of unbound) {
+        candidatesByDevice.set(
+          device.cloudflareDeviceId,
+          endpoints
+            .filter(
+              (endpoint) =>
+                normalizeHostname(endpoint.endpoint_name ?? endpoint.host_name) ===
+                device.hostname,
+            )
+            .map((endpoint) => {
+              const claim = claimByEndpoint.get(endpoint.endpoint_id);
+              return {
+                endpoint_id: endpoint.endpoint_id,
+                hostname: endpoint.endpoint_name ?? endpoint.host_name ?? null,
+                mac_address: endpoint.mac_address ?? null,
+                last_seen: endpoint.last_seen ?? null,
+                operational_status: endpoint.operational_status ?? null,
+                claimed_by:
+                  claim && claim.cloudflareDeviceId !== device.cloudflareDeviceId
+                    ? claim.cloudflareDeviceId
+                    : null,
+              };
+            }),
+        );
+      }
+    } catch (error) {
+      candidatesError = errorMessage(error);
+    }
+  }
+
+  return json({
+    unbound: unbound.map((device) => ({
+      device_id: device.cloudflareDeviceId,
+      hostname: device.hostname,
+      serial_number: device.serialNumber,
+      mac_address: device.macAddress,
+      last_attempt_at: device.lastAttemptAt,
+      attempts: device.attempts,
+      last_reason: device.lastReason,
+      candidates: candidatesByDevice.get(device.cloudflareDeviceId) ?? [],
+    })),
+    unbound_candidates_error: candidatesError,
+    drifted: drifted.map((device) => ({
+      device_id: device.cloudflareDeviceId,
+      endpoint_id: device.cortexEndpointId,
+      hostname: device.hostname,
+      serial_number: device.serialNumber,
+      bind_method: device.bindMethod,
+      drifted_at: device.driftedAt,
+    })),
+    serial_integrity: integrity,
+  });
+}
+
+// Pin a device to a specific Cortex endpoint. A pin is a permanent operator
+// decision stored in D1: automated resolution never overrides it, and it is
+// immune to hostname collisions and MAC changes.
+async function postApiBindings(request: Request, env: Env): Promise<Response> {
+  const body = await readRequestJson(request, 16 * 1024);
+  if (!isRecord(body)) throw new ClientError(400, "bindings_object_required");
+  const deviceId = optionalDeviceId(body.device_id);
+  const endpointId = optionalDeviceId(body.endpoint_id);
+
+  const unbound = await getUnboundDevice(env.DB, deviceId);
+  if (!unbound) throw new ClientError(404, "unbound_device_not_found");
+
+  const runtimeEnv = requireRuntimeEnv(env);
+  const endpoints = await getEndpointsByIds([endpointId], runtimeEnv);
+  if (endpoints.length === 0 || endpoints[0]?.endpoint_id !== endpointId) {
+    throw new ClientError(400, "unknown_endpoint");
+  }
+
+  // The same contention rule as automated resolution: never share an
+  // endpoint with a different device that still polls.
+  const claims = await getVerifiedMappingsByEndpointIds(env.DB, [endpointId]);
+  const claimedByOther = claims.some(
+    (claim) =>
+      claim.cloudflareDeviceId !== deviceId &&
+      (claim.lastSeenAt ?? 0) > Date.now() - 7 * 86_400_000,
+  );
+  if (claimedByOther) throw new ClientError(409, "endpoint_claimed_by_active_device");
+
+  const now = Date.now();
+  await pinDeviceBinding(env.DB, unbound, endpointId, now);
+  await enqueueRefreshes(env.REFRESH_QUEUE, [endpointId]);
+  return json({ pinned: true, device_id: deviceId, endpoint_id: endpointId });
+}
+
+// Release a device from tracking entirely: the mapping is removed, the serial
+// is tombstoned for the next list sync, and the next poll starts a fresh
+// discovery. Used to undo a wrong pin or drop a cloned enrollment.
+async function deleteApiBindings(request: Request, env: Env): Promise<Response> {
+  const body = await readRequestJson(request, 16 * 1024);
+  if (!isRecord(body)) throw new ClientError(400, "bindings_object_required");
+  const deviceId = optionalDeviceId(body.device_id);
+
+  const mappings = await getDeviceMappingsByDeviceIds(env.DB, [deviceId]);
+  if (mappings.length === 0) throw new ClientError(404, "device_not_found");
+  await deleteDevices(env.DB, [deviceId], Date.now());
+  return json({ released: true, device_id: deviceId });
+}
+
+function optionalDeviceId(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new ClientError(400, "invalid_device_id");
+  }
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 128) {
+    throw new ClientError(400, "invalid_device_id");
+  }
+  return trimmed;
 }
 
 async function getApiDebugLog(url: URL, env: Env): Promise<Response> {

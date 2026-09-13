@@ -12,6 +12,7 @@ const MIGRATION_NAMES = [
   "0011_device_last_seen",
   "0012_mapping_identity",
   "0013_bind_method",
+  "0014_unbound_devices",
 ] as const;
 
 // Idempotent equivalent of migrations 0001-0008, executed as one D1 batch
@@ -81,6 +82,15 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       serial_number TEXT PRIMARY KEY,
       observed_at INTEGER NOT NULL
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS unbound_devices (
+      cloudflare_device_id TEXT PRIMARY KEY,
+      hostname TEXT NOT NULL,
+      serial_number TEXT,
+      mac_address TEXT,
+      last_attempt_at INTEGER NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 1,
+      last_reason TEXT NOT NULL
+    )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS app_settings (
       name TEXT PRIMARY KEY,
       value TEXT NOT NULL,
@@ -115,6 +125,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       ON sync_leases(leased_until)`),
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_serial_removals_observed
       ON serial_removals(observed_at)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_unbound_devices_attempt
+      ON unbound_devices(last_attempt_at)`),
     db
       .prepare(
         `INSERT OR IGNORE INTO d1_migrations(name) VALUES ${MIGRATION_NAMES.map(

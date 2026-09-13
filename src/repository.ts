@@ -6,6 +6,7 @@ import type {
   StoredEvaluation,
 } from "./types";
 import {
+  isJunkSerial,
   normalizeHostname,
   normalizeMacCollection,
   normalizeTimestamp,
@@ -619,6 +620,305 @@ export async function touchMappingDrift(
       .bind(observedAt, deviceId, observedAt - throttleMs, observationId),
   );
   for (const batch of chunk(statements, 100)) await db.batch(batch);
+}
+
+export interface UnboundDevice {
+  cloudflareDeviceId: string;
+  hostname: string;
+  serialNumber: string | null;
+  macAddress: string | null;
+  lastAttemptAt: number;
+  attempts: number;
+  lastReason: string;
+}
+
+interface UnboundRow {
+  cloudflare_device_id: string;
+  hostname: string;
+  serial_number: string | null;
+  mac_address: string | null;
+  last_attempt_at: number;
+  attempts: number;
+  last_reason: string;
+}
+
+// Record a device whose binding decision needs an operator: ambiguous clones,
+// MAC-strict refusals, or endpoint contention. Devices Cortex has never heard
+// of (enrollment gaps) are not recorded - the coverage audit reports those.
+export async function upsertUnboundDevice(
+  db: D1Database,
+  device: CloudflareDevice,
+  reason: string,
+  observedAt: number,
+): Promise<void> {
+  const serial = device.serial_number?.trim() || null;
+  const macs = [...normalizeMacCollection(device.mac_address)];
+  await db
+    .prepare(
+      `INSERT INTO unbound_devices(
+         cloudflare_device_id, hostname, serial_number, mac_address,
+         last_attempt_at, attempts, last_reason
+       ) VALUES (?, ?, ?, ?, ?, 1, ?)
+       ON CONFLICT(cloudflare_device_id) DO UPDATE SET
+         hostname = excluded.hostname,
+         serial_number = excluded.serial_number,
+         mac_address = excluded.mac_address,
+         last_attempt_at = excluded.last_attempt_at,
+         attempts = attempts + 1,
+         last_reason = excluded.last_reason`,
+    )
+    .bind(
+      device.device_id,
+      normalizeHostname(device.hostname) || "(none)",
+      serial,
+      macs.length > 0 ? JSON.stringify(macs) : null,
+      observedAt,
+      reason,
+    )
+    .run();
+}
+
+export async function deleteUnboundDevices(
+  db: D1Database,
+  deviceIds: string[],
+): Promise<void> {
+  if (deviceIds.length === 0) return;
+  for (const ids of chunk(deviceIds, 80)) {
+    const placeholders = ids.map(() => "?").join(",");
+    await db
+      .prepare(
+        `DELETE FROM unbound_devices WHERE cloudflare_device_id IN (${placeholders})`,
+      )
+      .bind(...ids)
+      .run();
+  }
+}
+
+export async function listUnboundDevices(
+  db: D1Database,
+  limit = 50,
+): Promise<UnboundDevice[]> {
+  const result = await db
+    .prepare(
+      `SELECT cloudflare_device_id, hostname, serial_number, mac_address,
+              last_attempt_at, attempts, last_reason
+       FROM unbound_devices
+       ORDER BY last_attempt_at DESC
+       LIMIT ?`,
+    )
+    .bind(limit)
+    .all<UnboundRow>();
+  return result.results.map((row) => ({
+    cloudflareDeviceId: row.cloudflare_device_id,
+    hostname: row.hostname,
+    serialNumber: row.serial_number,
+    macAddress: row.mac_address,
+    lastAttemptAt: row.last_attempt_at,
+    attempts: row.attempts,
+    lastReason: row.last_reason,
+  }));
+}
+
+export async function getUnboundDevice(
+  db: D1Database,
+  deviceId: string,
+): Promise<UnboundDevice | null> {
+  const row = await db
+    .prepare(
+      `SELECT cloudflare_device_id, hostname, serial_number, mac_address,
+              last_attempt_at, attempts, last_reason
+       FROM unbound_devices
+       WHERE cloudflare_device_id = ?`,
+    )
+    .bind(deviceId)
+    .first<UnboundRow>();
+  if (!row) return null;
+  return {
+    cloudflareDeviceId: row.cloudflare_device_id,
+    hostname: row.hostname,
+    serialNumber: row.serial_number,
+    macAddress: row.mac_address,
+    lastAttemptAt: row.last_attempt_at,
+    attempts: row.attempts,
+    lastReason: row.last_reason,
+  };
+}
+
+export async function countUnboundDevices(db: D1Database): Promise<number> {
+  const row = await db
+    .prepare(`SELECT COUNT(*) AS total FROM unbound_devices`)
+    .first<{ total: number }>();
+  return row?.total ?? 0;
+}
+
+export async function deleteStaleUnboundDevices(
+  db: D1Database,
+  staleBefore: number,
+): Promise<void> {
+  await db
+    .prepare(`DELETE FROM unbound_devices WHERE last_attempt_at < ?`)
+    .bind(staleBefore)
+    .run();
+}
+
+export interface DriftedBinding {
+  cloudflareDeviceId: string;
+  cortexEndpointId: string;
+  hostname: string;
+  serialNumber: string | null;
+  bindMethod: string | null;
+  driftedAt: number;
+}
+
+interface DriftedRow {
+  cloudflare_device_id: string;
+  cortex_endpoint_id: string;
+  hostname: string;
+  serial_number: string | null;
+  bind_method: string | null;
+  drifted_at: number;
+}
+
+export async function listDriftedBindings(
+  db: D1Database,
+  limit = 100,
+): Promise<DriftedBinding[]> {
+  const result = await db
+    .prepare(
+      `SELECT cloudflare_device_id, cortex_endpoint_id, hostname,
+              serial_number, bind_method, drifted_at
+       FROM device_mappings
+       WHERE status = 'verified' AND drifted_at IS NOT NULL
+       ORDER BY drifted_at DESC
+       LIMIT ?`,
+    )
+    .bind(limit)
+    .all<DriftedRow>();
+  return result.results.map((row) => ({
+    cloudflareDeviceId: row.cloudflare_device_id,
+    cortexEndpointId: row.cortex_endpoint_id,
+    hostname: row.hostname,
+    serialNumber: row.serial_number,
+    bindMethod: row.bind_method,
+    driftedAt: row.drifted_at,
+  }));
+}
+
+// Operator pin: bind a device to a specific Cortex endpoint permanently. The
+// observation guard is deliberately absent - this is the operator overriding
+// automated resolution, and a queued discovery tied to an older observation
+// cannot overwrite it afterwards.
+export async function pinDeviceBinding(
+  db: D1Database,
+  unbound: UnboundDevice,
+  endpointId: string,
+  now: number,
+): Promise<void> {
+  const macs = (() => {
+    if (!unbound.macAddress) return null;
+    try {
+      const parsed: unknown = JSON.parse(unbound.macAddress);
+      return Array.isArray(parsed) ? JSON.stringify(parsed) : null;
+    } catch {
+      return null;
+    }
+  })();
+  await db
+    .prepare(
+      `INSERT INTO device_mappings(
+         cloudflare_device_id, serial_number, cortex_endpoint_id,
+         hostname, verified_mac, verified_macs, bind_method, status,
+         created_at, updated_at, last_verified_at, last_seen_at
+       ) VALUES (?, ?, ?, ?, ?, ?, 'pinned', 'verified', ?, ?, ?, ?)
+       ON CONFLICT(cloudflare_device_id) DO UPDATE SET
+         serial_number = excluded.serial_number,
+         cortex_endpoint_id = excluded.cortex_endpoint_id,
+         hostname = excluded.hostname,
+         verified_mac = excluded.verified_mac,
+         verified_macs = excluded.verified_macs,
+         bind_method = 'pinned',
+         drifted_at = NULL,
+         status = 'verified',
+         updated_at = excluded.updated_at,
+         last_verified_at = excluded.last_verified_at,
+         last_seen_at = excluded.last_seen_at`,
+    )
+    .bind(
+      unbound.cloudflareDeviceId,
+      unbound.serialNumber,
+      endpointId,
+      unbound.hostname,
+      unbound.macAddress ? JSON.parse(unbound.macAddress)[0] ?? "" : "",
+      macs ?? (unbound.macAddress ? JSON.stringify([unbound.macAddress]) : "[]"),
+      now,
+      now,
+      now,
+      now,
+    )
+    .run();
+  await deleteUnboundDevices(db, [unbound.cloudflareDeviceId]);
+}
+
+export interface SerialIntegrity {
+  duplicates: Array<{ serialNumber: string; devices: string[] }>;
+  junk: Array<{ cloudflareDeviceId: string; serialNumber: string | null }>;
+  missing: string[];
+}
+
+interface SerialGroupRow {
+  serial_number: string;
+  device_ids: string;
+}
+
+interface SerialRow {
+  cloudflare_device_id: string;
+  serial_number: string | null;
+}
+
+// Enforcement depends entirely on the serial Cloudflare reports - Cortex has
+// no serial of its own. Duplicates across clones and OEM junk values are
+// surfaced here because either silently breaks a SERIAL denylist entry.
+export async function serialIntegrity(db: D1Database): Promise<SerialIntegrity> {
+  const [duplicateRows, serialRows] = await Promise.all([
+    db
+      .prepare(
+        `SELECT TRIM(serial_number) AS serial_number,
+                GROUP_CONCAT(cloudflare_device_id) AS device_ids
+         FROM device_mappings
+         WHERE status = 'verified'
+           AND serial_number IS NOT NULL AND TRIM(serial_number) != ''
+         GROUP BY TRIM(serial_number)
+         HAVING COUNT(*) > 1`,
+      )
+      .all<SerialGroupRow>(),
+    db
+      .prepare(
+        `SELECT cloudflare_device_id, serial_number
+         FROM device_mappings
+         WHERE status = 'verified'`,
+      )
+      .all<SerialRow>(),
+  ]);
+
+  const duplicates = duplicateRows.results.map((row) => ({
+    serialNumber: row.serial_number,
+    devices: row.device_ids.split(","),
+  }));
+  const junk: Array<{ cloudflareDeviceId: string; serialNumber: string | null }> =
+    [];
+  const missing: string[] = [];
+  for (const row of serialRows.results) {
+    const trimmed = row.serial_number?.trim() ?? "";
+    if (!trimmed) {
+      missing.push(row.cloudflare_device_id);
+    } else if (isJunkSerial(trimmed)) {
+      junk.push({
+        cloudflareDeviceId: row.cloudflare_device_id,
+        serialNumber: row.serial_number,
+      });
+    }
+  }
+  return { duplicates, junk, missing };
 }
 
 export async function markMissingEndpoints(

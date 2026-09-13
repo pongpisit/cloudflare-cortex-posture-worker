@@ -58,6 +58,7 @@ expect "api devices (noncompliant)" 200 \
 expect "api devices (search)" 200 \
   "$(status "${BASE_URL}/api/devices?search=desktop&limit=10")"
 expect "api debug log" 200 "$(status "${BASE_URL}/api/debug-log")"
+expect "api bindings" 200 "$(status "${BASE_URL}/api/bindings")"
 expect_gated_or "refresh unknown device rejected" 404 \
   "$(mutating -X POST -H 'content-type: application/json' -d '{"deviceId":"does-not-exist"}' "${BASE_URL}/api/devices/refresh")"
 expect_gated_or "delete unknown device rejected" 404 \

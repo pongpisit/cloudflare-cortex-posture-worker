@@ -109,6 +109,16 @@ key — they are drift signals watched on every poll:
 - Identity checks tolerate missing data: a poll that omits the MAC never
   triggers drift on a mapping that has one, and vice versa.
 
+When automated resolution cannot decide — clone twins sharing a hostname, an
+endpoint already claimed by a device that still polls, or a MAC-strict
+refusal — the device fails open and lands in an operator queue instead of
+being guessed into a binding. `GET /api/bindings` lists the queue with
+candidate endpoints, `POST /api/bindings` pins the right one permanently
+(immune to hostname and MAC churn), and the same endpoint reports serial
+integrity — duplicate or junk serials (common on cloned VMs) can never be
+enforced by a SERIAL list, so they are surfaced rather than silently
+mis-enforced.
+
 For every periodic mechanism and its cadence — how the D1 inventory stays
 current without a nightly bulk import — see the
 [data lifecycle](docs/architecture.md#data-lifecycle) in the architecture guide.
