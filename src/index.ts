@@ -1174,6 +1174,25 @@ async function postApiDeviceRefresh(
 ): Promise<Response> {
   const body = await readRequestJson(request, 16 * 1024);
   if (!isRecord(body)) throw new ClientError(400, "device_id_required");
+  if (body.all !== undefined) {
+    if (typeof body.all !== "boolean") {
+      throw new ClientError(400, "invalid_all_flag");
+    }
+    if (!body.all) throw new ClientError(400, "device_id_required");
+    // Fleet-wide manual sync: enqueue the same refresh path Cron uses for
+    // every mapped endpoint. Verdicts land in the snapshots within seconds
+    // and the next list sync (Cron or "Sync now") publishes them.
+    const endpointIds = await getMappedEndpointIds(env.DB);
+    if (endpointIds.size === 0) return json({ refresh_queued: 0 });
+    await enqueueRefreshes(env.REFRESH_QUEUE, [...endpointIds]);
+    console.log(
+      JSON.stringify({
+        event: "manual_cortex_refresh_queued",
+        endpoints: endpointIds.size,
+      }),
+    );
+    return json({ refresh_queued: endpointIds.size });
+  }
   let deviceIds: string[];
   if (typeof body.deviceId === "string" && body.deviceId.trim()) {
     deviceIds = [body.deviceId.trim()];

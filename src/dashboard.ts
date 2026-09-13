@@ -192,6 +192,7 @@ const DASHBOARD_HTML = `<!doctype html>
       <div class="config-actions">
         <button type="button" id="load-lists">Load lists</button>
         <button type="button" id="sync-now">Sync now</button>
+        <button type="button" id="refresh-all">Refresh all from Cortex</button>
         <button type="button" id="coverage-audit">Coverage audit</button>
         <button type="button" id="save-config" class="primary">Save configuration</button>
       </div>
@@ -583,6 +584,31 @@ const DASHBOARD_HTML = `<!doctype html>
       });
   }
 
+  function refreshAllFromCortex() {
+    configMessage("Refreshing all devices from Cortex\\u2026");
+    mutatingFetch("/api/devices/refresh", {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ all: true })
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error("refresh failed (" + r.status + ")");
+        return r.json();
+      })
+      .then(function (payload) {
+        configMessage(
+          "Queued " + payload.refresh_queued + " endpoint(s) for Cortex refresh \\u00b7 verdicts publish on the next sync"
+        );
+        refresh();
+      })
+      .catch(function (err) {
+        configMessage("Error: " + String(err && err.message ? err.message : err));
+      });
+  }
+
   function coverageAudit() {
     configMessage("Scanning Cortex inventory\\u2026 this can take a while on large fleets");
     mutatingFetch("/api/coverage?windowDays=30", { method: "POST", headers: { accept: "application/json" } })
@@ -946,6 +972,7 @@ const DASHBOARD_HTML = `<!doctype html>
   document.getElementById("load-lists").addEventListener("click", loadLists);
   document.getElementById("save-config").addEventListener("click", saveConfig);
     document.getElementById("sync-now").addEventListener("click", syncNow);
+    document.getElementById("refresh-all").addEventListener("click", refreshAllFromCortex);
     document.getElementById("coverage-audit").addEventListener("click", coverageAudit);
   document.getElementById("account-select").addEventListener("change", fillListOptions);
 

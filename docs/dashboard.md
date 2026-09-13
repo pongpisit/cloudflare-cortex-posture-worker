@@ -18,6 +18,10 @@ applied on the next Cron run without a redeploy:
   stays disabled until you turn it on.
 - **Sync now** runs the list synchronization immediately instead of waiting
   for the next Cron cycle.
+- **Refresh all from Cortex** queues the Cron-style Cortex refresh for every
+  mapped endpoint at once — a manual pull of the whole fleet's security
+  content into the Worker. Verdicts update within seconds; run **Sync now**
+  (or wait for the next Cron cycle) to publish them to the denylist.
 - **Coverage audit** scans the Cortex inventory for endpoints seen in the
   last 30 days and reports how many have a Cloudflare device mapped in D1.
   Uncovered endpoints cannot be enforced until their machines enroll the
@@ -54,7 +58,7 @@ dashboard page itself stay open.
 | --- | --- |
 | `GET /api/overview` | Integration statuses, device counts, noncompliant serial count, sync state |
 | `GET /api/devices?status=all&limit=N` | Per-device compliance rows; `status=all\|noncompliant\|compliant`, `search=<text>`, `limit` 1–500, default 200 |
-| `POST /api/devices/refresh` | Refresh devices from Cortex immediately: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100 |
+| `POST /api/devices/refresh` | Refresh devices from Cortex immediately: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100; or `{"all": true}` to queue the Cron-style refresh for **every mapped endpoint** (returns `refresh_queued`; verdicts publish on the next list sync) |
 | `POST /api/devices/delete` | Delete devices from tracking: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100 |
 | `POST /api/sync` | Run the list synchronization immediately |
 | `POST /api/coverage?windowDays=30` | Diff the recently seen Cortex inventory against D1 mappings; returns `scanned`, `covered`, `uncovered`, `coverage_percent`, `truncated`, and an `uncovered_sample` of up to 100 endpoints |

@@ -29,6 +29,7 @@ structured events include:
 - `serial_denylist_capacity_warning`
 - `device_mapping_failed`
 - `scheduled_refresh`
+- `manual_cortex_refresh_queued`
 - `cortex_refresh_error`
 
 The Worker refuses to update when the desired count exceeds the configured list
