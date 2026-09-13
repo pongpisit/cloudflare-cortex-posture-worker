@@ -13,9 +13,11 @@ import {
   classifyIdentity,
   coverageSummary,
   evaluateEndpoint,
+  matchesHostnamePattern,
   needsMacsUnion,
   normalizeHostname,
   normalizeMacCollection,
+  parseHostnamePatterns,
   resolveCortexEndpoint,
 } from "./posture";
 import { ensureSchema } from "./schema";
@@ -357,11 +359,52 @@ export default {
           : Promise.resolve(),
       ]);
 
+      // Non-persistent VDI (and any other excluded hostname pattern) never
+      // enters binding: identity is unstable by construction, so discovery
+      // would only churn the mapping table while cloned serials poison the
+      // denylist. Excluded devices fail open and are dropped before the
+      // discovery queue.
+      let discoveriesToSend = discoveries;
+      if (discoveries.length > 0) {
+        try {
+          const patterns = parseHostnamePatterns(
+            (await getAppSettings(env.DB)).vdiHostnamePatterns,
+          );
+          if (patterns.length > 0) {
+            const excluded = new Set(
+              discoveries
+                .filter((device) =>
+                  matchesHostnamePattern(device.hostname, patterns),
+                )
+                .map((device) => device.device_id),
+            );
+            if (excluded.size > 0) {
+              discoveriesToSend = discoveries.filter(
+                (device) => !excluded.has(device.device_id),
+              );
+              console.log(
+                JSON.stringify({
+                  event: "vdi_devices_excluded",
+                  devices: excluded.size,
+                }),
+              );
+            }
+          }
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "vdi_exclusion_error",
+              error: errorMessage(error),
+            }),
+          );
+        }
+      }
+
       ctx.waitUntil(
         Promise.all([
           enqueueDiscoveries(
             env.REFRESH_QUEUE,
-            discoveries,
+            discoveriesToSend,
             observationId,
             observedAt,
           ),
@@ -673,6 +716,7 @@ async function processRefreshMessage(
   if (hostnames.length === 0) return false;
 
   const settings = await getAppSettings(env.DB);
+  const exclusionPatterns = parseHostnamePatterns(settings.vdiHostnamePatterns);
   const endpoints = await getEndpointsByHostnames(hostnames, env);
   const matched = new Map<string, CortexEndpoint>();
   const resolved: Array<{
@@ -682,7 +726,14 @@ async function processRefreshMessage(
   }> = [];
   const now = Date.now();
 
+  let excludedCount = 0;
   for (const device of message.devices) {
+    // Messages enqueued before an exclusion pattern was set may still carry
+    // excluded devices; the consumer honors the setting too.
+    if (matchesHostnamePattern(device.hostname, exclusionPatterns)) {
+      excludedCount += 1;
+      continue;
+    }
     const outcome = resolveCortexEndpoint(device, endpoints, now, {
       requireMac: settings.requireMacCorroboration,
     });
@@ -703,6 +754,11 @@ async function processRefreshMessage(
       continue;
     }
     resolved.push({ device, endpoint: outcome.endpoint, method: outcome.method });
+  }
+  if (excludedCount > 0) {
+    console.log(
+      JSON.stringify({ event: "vdi_devices_excluded", devices: excludedCount }),
+    );
   }
 
   // Clone-contention guard: an endpoint already bound to a different device
@@ -1718,6 +1774,16 @@ function parseSettingsUpdate(body: unknown): Record<string, string> {
     updates.require_mac_corroboration = body.requireMacCorroboration
       ? "true"
       : "false";
+  }
+  if (body.vdiHostnamePatterns !== undefined) {
+    if (typeof body.vdiHostnamePatterns !== "string") {
+      throw new ClientError(400, "invalid_vdi_hostname_patterns");
+    }
+    const patterns = parseHostnamePatterns(body.vdiHostnamePatterns);
+    if (patterns.join(",").length > 500) {
+      throw new ClientError(400, "invalid_vdi_hostname_patterns");
+    }
+    updates.vdi_hostname_patterns = patterns.join(",");
   }
   if (body.maxContentAgeDays !== undefined) {
     updates.max_content_age_days = String(

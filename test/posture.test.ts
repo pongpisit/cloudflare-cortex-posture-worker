@@ -10,6 +10,8 @@ import {
   normalizeTimestamp,
   parseVerifiedMacs,
   isJunkSerial,
+  matchesHostnamePattern,
+  parseHostnamePatterns,
   resolveCortexEndpoint,
 } from "../src/posture";
 import type { CloudflareDevice, CortexEndpoint } from "../src/types";
@@ -170,6 +172,40 @@ describe("serial integrity", () => {
     expect(isJunkSerial("VMware-56 4d 4a e5 a7 53 b9 01")).toBe(false);
     expect(isJunkSerial("C02XK1QGJG5H")).toBe(false);
     expect(isJunkSerial("JD4NX12345")).toBe(false);
+  });
+});
+
+describe("hostname exclusion patterns", () => {
+  it("parses comma-separated globs with normalization", () => {
+    expect(parseHostnamePatterns(" VDI-*, Pooled-? ,x")).toEqual([
+      "vdi-*",
+      "pooled-?",
+      "x",
+    ]);
+    expect(parseHostnamePatterns("  , ,")).toEqual([]);
+    expect(parseHostnamePatterns(null)).toEqual([]);
+  });
+
+  it("matches hostnames case-insensitively with wildcards", () => {
+    const patterns = parseHostnamePatterns("vdi-*,pooled-*,kiosk1");
+    expect(matchesHostnamePattern("VDI-SESSION-42", patterns)).toBe(true);
+    expect(matchesHostnamePattern("pooled-7.example.com", patterns)).toBe(true);
+    expect(matchesHostnamePattern("Kiosk1", patterns)).toBe(true);
+    expect(matchesHostnamePattern("desktop-r76evb9", patterns)).toBe(false);
+    expect(matchesHostnamePattern(undefined, patterns)).toBe(false);
+  });
+
+  it("does not let a wildcard cross unintended boundaries without matching", () => {
+    const patterns = parseHostnamePatterns("vdi-*");
+    expect(matchesHostnamePattern("avdi-1", patterns)).toBe(false);
+    expect(matchesHostnamePattern("vdi-", patterns)).toBe(true);
+  });
+
+  it("matches nothing when no patterns are configured", () => {
+    expect(matchesHostnamePattern("vdi-1", [])).toBe(false);
+    expect(matchesHostnamePattern("vdi-1", parseHostnamePatterns(""))).toBe(
+      false,
+    );
   });
 });
 

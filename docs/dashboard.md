@@ -16,6 +16,14 @@ applied on the next Cron run without a redeploy:
   and 5,000 on Enterprise).
 - **Enable list synchronization** is the master switch for list updates. It
   stays disabled until you turn it on.
+- **Require MAC corroboration** makes discovery refuse hostname-only matches:
+  new devices only bind when Cloudflare's MAC matches a Cortex endpoint's MAC.
+  Check the binding-method counts in `/api/overview` before enabling.
+- **Excluded hostname patterns** takes comma-separated globs (for example
+  `vdi-*,pooled-*`) for machines that must never bind — non-persistent VDI
+  pools have no stable identity, so binding would only churn the mapping
+  table while their cloned serials poison the denylist. Matching devices fail
+  open with zero writes.
 - **Sync now** runs the list synchronization immediately instead of waiting
   for the next Cron cycle.
 - **Refresh all from Cortex** queues the Cron-style Cortex refresh for every
@@ -73,7 +81,7 @@ dashboard page itself stay open.
 | `GET /api/debug-log?limit=N` | Recent Cortex request/response pairs, `limit` 1–200, default 50 |
 | `DELETE /api/debug-log` | Clear the debug log |
 | `GET /api/settings` | Current operational settings and readiness flags |
-| `PUT /api/settings` | Update settings: `cloudflareAccountId`, `serialListId`, `serialListName`, `listSyncEnabled`, `maxContentAgeDays` (1–365), `listMaxItems` (1–100000), `debugLogEnabled`, `requireMacCorroboration` |
+| `PUT /api/settings` | Update settings: `cloudflareAccountId`, `serialListId`, `serialListName`, `listSyncEnabled`, `maxContentAgeDays` (1–365), `listMaxItems` (1–100000), `debugLogEnabled`, `requireMacCorroboration`, `vdiHostnamePatterns` (comma-separated exclusion globs) |
 | `GET /api/cloudflare/lists` | Accounts and `SERIAL` lists visible to the API token |
 
 Settings can also be updated directly:

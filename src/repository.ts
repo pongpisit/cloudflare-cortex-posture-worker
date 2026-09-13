@@ -1067,6 +1067,7 @@ export interface AppSettings {
   listMaxItems: number;
   debugLogEnabled: boolean;
   requireMacCorroboration: boolean;
+  vdiHostnamePatterns: string | null;
 }
 
 interface AppSettingRow {
@@ -1083,6 +1084,7 @@ const APP_SETTING_KEYS = [
   "list_max_items",
   "debug_log_enabled",
   "require_mac_corroboration",
+  "vdi_hostname_patterns",
 ] as const;
 
 export async function getAppSettings(db: D1Database): Promise<AppSettings> {
@@ -1108,6 +1110,7 @@ export async function getAppSettings(db: D1Database): Promise<AppSettings> {
     listMaxItems: settingInt(values.get("list_max_items"), 1, 100_000, 1000),
     debugLogEnabled: values.get("debug_log_enabled") !== "false",
     requireMacCorroboration: values.get("require_mac_corroboration") === "true",
+    vdiHostnamePatterns: values.get("vdi_hostname_patterns") || null,
   };
 }
 

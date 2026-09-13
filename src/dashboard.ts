@@ -189,6 +189,10 @@ const DASHBOARD_HTML = `<!doctype html>
       <div class="config-field">
         <label><input id="require-mac" type="checkbox"> Require MAC corroboration for new bindings</label>
       </div>
+      <div class="config-field">
+        <label for="vdi-patterns">Excluded hostname patterns (VDI pools, comma-separated globs)</label>
+        <input id="vdi-patterns" type="text" placeholder="e.g. vdi-*,pooled-*" autocomplete="off">
+      </div>
       <div class="config-actions">
         <button type="button" id="load-lists">Load lists</button>
         <button type="button" id="sync-now">Sync now</button>
@@ -419,6 +423,7 @@ const DASHBOARD_HTML = `<!doctype html>
     document.getElementById("sync-enabled").checked = !!s.listSyncEnabled;
     document.getElementById("debug-log-enabled").checked = s.debugLogEnabled !== false;
     document.getElementById("require-mac").checked = !!s.requireMacCorroboration;
+    document.getElementById("vdi-patterns").value = s.vdiHostnamePatterns || "";
 
     var flags = [];
     flags.push(payload.cloudflare_api_token_configured ? "Cloudflare API token configured" : "Cloudflare API token missing");
@@ -530,7 +535,8 @@ const DASHBOARD_HTML = `<!doctype html>
       listMaxItems: parseInt(document.getElementById("capacity").value, 10),
       listSyncEnabled: document.getElementById("sync-enabled").checked,
       debugLogEnabled: document.getElementById("debug-log-enabled").checked,
-      requireMacCorroboration: document.getElementById("require-mac").checked
+      requireMacCorroboration: document.getElementById("require-mac").checked,
+      vdiHostnamePatterns: document.getElementById("vdi-patterns").value
     };
     if (isNaN(body.maxContentAgeDays) || isNaN(body.listMaxItems)) {
       configMessage("Threshold and capacity must be numbers.");

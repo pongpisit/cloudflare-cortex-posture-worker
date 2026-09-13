@@ -96,6 +96,7 @@ describe("dashboard repository", () => {
       listMaxItems: 1000,
       debugLogEnabled: true,
       requireMacCorroboration: false,
+      vdiHostnamePatterns: null,
     });
   });
 
@@ -109,6 +110,7 @@ describe("dashboard repository", () => {
       { name: "list_max_items", value: "5000" },
       { name: "debug_log_enabled", value: "false" },
       { name: "require_mac_corroboration", value: "true" },
+      { name: "vdi_hostname_patterns", value: "vdi-*,pooled-*" },
     ]);
     await expect(getAppSettings(db)).resolves.toEqual({
       cloudflareAccountId: "aa8ab6fe5b7f906df426a972033e922a",
@@ -119,6 +121,7 @@ describe("dashboard repository", () => {
       listMaxItems: 5000,
       debugLogEnabled: false,
       requireMacCorroboration: true,
+      vdiHostnamePatterns: "vdi-*,pooled-*",
     });
   });
 

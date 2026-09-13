@@ -117,7 +117,9 @@ candidate endpoints, `POST /api/bindings` pins the right one permanently
 (immune to hostname and MAC churn), and the same endpoint reports serial
 integrity — duplicate or junk serials (common on cloned VMs) can never be
 enforced by a SERIAL list, so they are surfaced rather than silently
-mis-enforced.
+mis-enforced. Machines that should never bind at all — non-persistent VDI
+pools, for instance — can be excluded by hostname pattern so they fail open
+without churning the mapping table.
 
 For every periodic mechanism and its cadence — how the D1 inventory stays
 current without a nightly bulk import — see the

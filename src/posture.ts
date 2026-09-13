@@ -251,6 +251,36 @@ export function isJunkSerial(value: unknown): boolean {
   return JUNK_SERIALS.has(normalized);
 }
 
+// Comma-separated hostname glob patterns (for example "vdi-*,pooled-*") that
+// identify machines excluded from binding. Non-persistent VDI pools have no
+// stable identity by construction: sessions respawn with fresh device
+// identities, so binding attempts only churn the mapping table, and their
+// cloned serials would poison the SERIAL denylist. Excluded devices fail
+// open and write nothing.
+export function parseHostnamePatterns(
+  value: string | null | undefined,
+): string[] {
+  return String(value ?? "")
+    .split(",")
+    .map((pattern) => pattern.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+export function matchesHostnamePattern(
+  hostname: unknown,
+  patterns: string[],
+): boolean {
+  if (patterns.length === 0) return false;
+  const normalized = normalizeHostname(hostname);
+  if (!normalized) return false;
+  return patterns.some((pattern) => {
+    const escaped = pattern
+      .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*/g, ".*");
+    return new RegExp(`^${escaped}$`).test(normalized);
+  });
+}
+
 export interface CoverageSummary {
   scanned: number;
   covered: number;
