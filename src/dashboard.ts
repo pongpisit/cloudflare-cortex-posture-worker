@@ -653,8 +653,9 @@ const DASHBOARD_HTML = `<!doctype html>
         var sample = payload.uncovered_sample || [];
         if (sample.length > 0) {
           var labels = {
-            duplicate_of_mapped_hostname: "stale/duplicate Cortex record on an already-enrolled machine",
-            queued_for_operator_review: "already queued for review",
+            duplicate_of_mapped_device: "MAC-corroborated duplicate of an already-mapped device",
+            queued_for_operator_review: "MAC-corroborated match already queued for review",
+            ambiguous_hostname_shared_by_multiple_devices: "hostname collision, MAC does not match \\u2014 needs a look (possible clone)",
             no_cloudflare_device: "no Cloudflare device enrolled with this hostname"
           };
           var byReason = {};

@@ -35,14 +35,17 @@ applied on the next Cron run without a redeploy:
   instead of three separate steps run in the right order.
 - **Coverage audit** scans the Cortex inventory for endpoints seen in the
   last 30 days and reports how many have a Cloudflare device mapped in D1.
-  Each uncovered endpoint is diagnosed, not just listed: a hostname that is
-  already mapped under a different `endpoint_id`, or already sitting in the
-  operator queue, is a stale or duplicate Cortex record on a machine that is
-  already enrolled — not a real gap — and the response says so along with
-  the fix (run **Sync now**, or review `GET /api/bindings`). Only a hostname
-  with no Cloudflare device at all is a genuine enrollment gap, and those are
-  reported for enrollment rather than imported. On large fleets the audit
-  performs one Cortex request per 100 endpoints and can take a while.
+  Each uncovered endpoint is diagnosed, not just listed — and hostname alone
+  is never enough to call something a duplicate, since a clone VM can report
+  an identical hostname while being different hardware. A hostname collision
+  is only treated as the same machine when the endpoint's MAC actually
+  matches an already-mapped or already-queued device; the response then
+  points at **Sync now** or `GET /api/bindings`. A hostname collision whose
+  MAC does *not* match is reported as an ambiguous collision instead — a
+  signal to check for a clone or naming collision, not something to ignore.
+  Only a hostname with no Cloudflare device at all is a genuine enrollment
+  gap. On large fleets the audit performs one Cortex request per 100
+  endpoints and can take a while.
 
 Each device row has a **Check** button that refreshes that single device from
 Cortex on demand and updates the row with the result. Rows also have
@@ -82,7 +85,7 @@ dashboard page itself stay open.
 | `POST /api/devices/refresh` | Advanced primitive behind "Sync now": refresh specific devices from Cortex, `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100; or `{"all": true}` for every mapped endpoint without a Cloudflare resync first |
 | `POST /api/devices/resync` | Advanced primitive behind "Sync now": pull the Cloudflare device inventory and queue discovery for every unmapped, non-excluded, non-revoked device, without also refreshing Cortex content or publishing |
 | `POST /api/devices/delete` | Delete devices from tracking: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100. Devices the provider reported in the last 48 hours are refused with 409 — add `"force": true` to override, since deletion removes their serial from the denylist on the next sync |
-| `POST /api/coverage?windowDays=30` | Diff the recently seen Cortex inventory against D1 mappings; returns `scanned`, `covered`, `uncovered`, `coverage_percent`, `truncated`, and an `uncovered_sample` of up to 100 endpoints, each with a `reason` (`duplicate_of_mapped_hostname`, `queued_for_operator_review`, or `no_cloudflare_device`) and a `fix` describing what to do |
+| `POST /api/coverage?windowDays=30` | Diff the recently seen Cortex inventory against D1 mappings; returns `scanned`, `covered`, `uncovered`, `coverage_percent`, `truncated`, and an `uncovered_sample` of up to 100 endpoints, each with a MAC-corroborated `reason` (`duplicate_of_mapped_device`, `queued_for_operator_review`, `ambiguous_hostname_shared_by_multiple_devices`, or `no_cloudflare_device`) and a `fix` describing what to do |
 | `GET /api/bindings` | The operator queue: unbound devices (clone contention, ambiguity, MAC-strict refusals) with candidate Cortex endpoints, drifted bindings, and the serial-integrity report (duplicate, junk, and missing serials) |
 | `POST /api/bindings` | Pin an unbound device to a specific Cortex endpoint permanently: `{"device_id": "...", "endpoint_id": "..."}`. Refuses endpoints actively claimed by a different device (409) |
 | `DELETE /api/bindings` | Release a device entirely (undo a wrong pin, drop a cloned enrollment): `{"device_id": "..."}` — removes the mapping and tombstones the serial for the next sync. Devices reported in the last 48 hours require `"force": true` (409 otherwise) |

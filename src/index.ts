@@ -37,8 +37,8 @@ import {
   getAppSettingValues,
   getAllVerifiedDeviceIds,
   getMappedEndpointIds,
-  getMappedHostnames,
-  getUnboundHostnames,
+  getMappedMacsByHostname,
+  getUnboundMacsByHostname,
   getStaleDeviceIds,
   bootstrapAppSettings,
   getDashboardIntegrations,
@@ -1946,11 +1946,12 @@ async function postApiSync(env: Env): Promise<Response> {
 // Diffs the recently seen Cortex inventory against the verified mappings in
 // D1. Uncovered endpoints have no Cloudflare device: they can never be
 // enforced, so they are reported for enrollment instead of being imported.
-// Each uncovered entry is also diagnosed: a hostname that is already mapped
-// (under a different endpoint_id) or already queued for an operator
-// decision is a stale/duplicate Cortex record on an already-enrolled
-// machine, not a genuine enrollment gap - reporting both the same way would
-// send an operator chasing an enrollment that already exists.
+// Each uncovered entry is also diagnosed, but hostname alone never proves
+// two records are the same machine - a clone VM can report an identical
+// hostname while being different hardware. A hostname collision with an
+// already-mapped or already-queued device is only called a duplicate when
+// the MACs actually corroborate; otherwise it is reported as a genuinely
+// ambiguous collision instead of being waved off.
 async function postApiCoverage(url: URL, env: Env): Promise<Response> {
   const runtimeEnv = requireRuntimeEnv(env);
   let windowDays = 30;
@@ -1967,12 +1968,19 @@ async function postApiCoverage(url: URL, env: Env): Promise<Response> {
     runtimeEnv,
     windowDays,
   );
-  const [mappedEndpointIds, mappedHostnames, unboundHostnames] =
+  const [mappedEndpointIds, mappedMacsByHostname, unboundMacsByHostname] =
     await Promise.all([
       getMappedEndpointIds(env.DB),
-      getMappedHostnames(env.DB),
-      getUnboundHostnames(env.DB),
+      getMappedMacsByHostname(env.DB),
+      getUnboundMacsByHostname(env.DB),
     ]);
+  const macsIntersect = (a: Set<string> | undefined, b: Set<string>) => {
+    if (!a || a.size === 0 || b.size === 0) return false;
+    for (const mac of b) {
+      if (a.has(mac)) return true;
+    }
+    return false;
+  };
   const summary = coverageSummary(endpoints, mappedEndpointIds);
   const uncoveredSample = endpoints
     .filter((endpoint) => !mappedEndpointIds.has(endpoint.endpoint_id))
@@ -1981,16 +1989,26 @@ async function postApiCoverage(url: URL, env: Env): Promise<Response> {
       const hostname = normalizeHostname(
         endpoint.endpoint_name ?? endpoint.host_name,
       );
+      const endpointMacs = normalizeMacCollection(endpoint.mac_address);
+      const mappedMacs = hostname ? mappedMacsByHostname.get(hostname) : undefined;
+      const unboundMacs = hostname ? unboundMacsByHostname.get(hostname) : undefined;
       let reason: string;
       let fix: string;
-      if (hostname && mappedHostnames.has(hostname)) {
-        reason = "duplicate_of_mapped_hostname";
+      if (macsIntersect(mappedMacs, endpointMacs)) {
+        reason = "duplicate_of_mapped_device";
         fix =
-          "A Cloudflare device with this hostname is already mapped under a different Cortex endpoint_id - a stale or reinstalled agent record, not a missing enrollment. Run Sync now; a live poll resolves to the current endpoint automatically.";
-      } else if (hostname && unboundHostnames.has(hostname)) {
+          "MAC-corroborated: this Cortex endpoint is the same physical machine as an already-mapped Cloudflare device (typically a Cortex agent reinstall). Safe to ignore, or run Sync now to let stale-endpoint cleanup catch up.";
+      } else if (macsIntersect(unboundMacs, endpointMacs)) {
         reason = "queued_for_operator_review";
         fix =
-          "A device with this hostname is already waiting in the operator queue. Review it with GET /api/bindings.";
+          "MAC-corroborated match with a device already waiting in the operator queue. Review it with GET /api/bindings.";
+      } else if (
+        (hostname && mappedMacsByHostname.has(hostname)) ||
+        (hostname && unboundMacsByHostname.has(hostname))
+      ) {
+        reason = "ambiguous_hostname_shared_by_multiple_devices";
+        fix =
+          "This hostname is shared by another device, but none of their MAC addresses match this Cortex endpoint - do not assume it is the same machine. This may be a clone VM or naming collision that needs its own Cloudflare enrollment, or the same machine's Cloudflare MAC has changed without Cortex reporting it yet. Check GET /api/bindings and verify in your VM or MDM inventory.";
       } else {
         reason = "no_cloudflare_device";
         fix =

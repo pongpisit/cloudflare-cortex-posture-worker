@@ -118,12 +118,17 @@ To verify that the enforceable subset covers the whole Cortex fleet, run the
 dashboard's **Coverage audit**: it scans the recently seen Cortex inventory
 (`windowDays`, default 30) and reports endpoints that have no Cloudflare
 device *mapped to that specific endpoint_id*. Each is diagnosed rather than
-lumped together: a hostname already mapped under a different endpoint_id, or
-already sitting in the operator queue, is a stale or duplicate Cortex record
-on an already-enrolled machine (`reason: duplicate_of_mapped_hostname` /
-`queued_for_operator_review`), not a real gap, and the fix is to sync or
-review the queue rather than enroll anything. Only `no_cloudflare_device` is
-a genuine enrollment gap, reported rather than imported, because a serial
+lumped together, and hostname alone is never trusted as proof of a
+duplicate — a clone VM can report an identical hostname while being
+different hardware. A hostname collision is only called a duplicate when the
+endpoint's MAC actually intersects an already-mapped or already-queued
+device's verified MACs (`reason: duplicate_of_mapped_device` /
+`queued_for_operator_review`); the fix is to sync or review the queue. A
+hostname collision whose MAC does *not* corroborate is reported as
+`ambiguous_hostname_shared_by_multiple_devices` — a real signal to check for
+a clone or naming collision, not something to wave off. Only
+`no_cloudflare_device` is a genuine enrollment gap, reported rather than
+imported, because a serial
 without a Cloudflare device can never be evaluated by a policy.
 
 ## Decision logic

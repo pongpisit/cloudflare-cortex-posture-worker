@@ -63,22 +63,52 @@ export async function getMappedEndpointIds(
 // Every hostname already bound to a verified mapping. Lets the coverage
 // audit tell "this uncovered endpoint is a duplicate/stale Cortex record for
 // an already-enrolled machine" apart from a genuine enrollment gap.
-export async function getMappedHostnames(db: D1Database): Promise<Set<string>> {
+// Verified MAC evidence grouped by hostname, unioned across every mapped
+// device sharing that hostname. Hostname alone never proves two Cortex
+// records are the same machine - a clone VM can report an identical
+// hostname while being different hardware - so the coverage audit only
+// treats an uncovered endpoint as a known duplicate when its own MAC
+// intersects this set.
+export async function getMappedMacsByHostname(
+  db: D1Database,
+): Promise<Map<string, Set<string>>> {
   const result = await db
     .prepare(
-      "SELECT DISTINCT hostname FROM device_mappings WHERE status = 'verified'",
+      `SELECT hostname, verified_mac, verified_macs
+       FROM device_mappings WHERE status = 'verified'`,
     )
-    .all<{ hostname: string }>();
-  return new Set(result.results.map((row) => row.hostname));
+    .all<{
+      hostname: string;
+      verified_mac: string;
+      verified_macs: string | null;
+    }>();
+  const byHostname = new Map<string, Set<string>>();
+  for (const row of result.results) {
+    const macs = parseVerifiedMacs(row.verified_macs, row.verified_mac);
+    const existing = byHostname.get(row.hostname) ?? new Set<string>();
+    for (const mac of macs) existing.add(mac);
+    byHostname.set(row.hostname, existing);
+  }
+  return byHostname;
 }
 
-// Every hostname already waiting in the operator queue. Lets the coverage
-// audit point at GET /api/bindings instead of reporting the same gap twice.
-export async function getUnboundHostnames(db: D1Database): Promise<Set<string>> {
+// Same idea for the operator queue: a hostname collision with a queued
+// device is only meaningful when the MACs actually agree.
+export async function getUnboundMacsByHostname(
+  db: D1Database,
+): Promise<Map<string, Set<string>>> {
   const result = await db
-    .prepare("SELECT DISTINCT hostname FROM unbound_devices")
-    .all<{ hostname: string }>();
-  return new Set(result.results.map((row) => row.hostname));
+    .prepare("SELECT hostname, mac_address FROM unbound_devices")
+    .all<{ hostname: string; mac_address: string | null }>();
+  const byHostname = new Map<string, Set<string>>();
+  for (const row of result.results) {
+    const macs = parseVerifiedMacs(row.mac_address, null);
+    if (macs.size === 0) continue;
+    const existing = byHostname.get(row.hostname) ?? new Set<string>();
+    for (const mac of macs) existing.add(mac);
+    byHostname.set(row.hostname, existing);
+  }
+  return byHostname;
 }
 
 export async function getStoredEvaluations(
