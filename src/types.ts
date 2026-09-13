@@ -18,6 +18,12 @@ export interface CortexEndpoint {
   mac_address?: string | string[];
 }
 
+// How a device-to-endpoint binding was established. "mac" bindings are
+// corroborated by matching MAC addresses on both sides; "hostname" bindings
+// rest on a unique (or liveness-pruned) hostname match alone; "pinned"
+// bindings were chosen by an operator.
+export type BindMethod = "mac" | "hostname" | "pinned";
+
 export interface StoredEvaluation {
   cloudflareDeviceId: string;
   cortexEndpointId: string;
@@ -27,6 +33,8 @@ export interface StoredEvaluation {
   hostname: string;
   verifiedMac: string;
   verifiedMacs: Set<string>;
+  driftedAt: number | null;
+  bindMethod: string | null;
   serialNumber: string | null;
   lastSeenAt: number | null;
 }

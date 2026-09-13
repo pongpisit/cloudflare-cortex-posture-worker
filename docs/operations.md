@@ -115,6 +115,7 @@ Dashboard-managed settings (stored in D1, with defaults):
 | List capacity | `1000` | Safety limit; `5000` on Enterprise entitlements |
 | List synchronization | disabled | Master switch for list updates |
 | Cortex traffic logging | enabled | Store recent Cortex request/response pairs for the debug panel |
+| Require MAC corroboration | disabled | When enabled, new bindings are only established when Cloudflare's MAC matches a Cortex endpoint's MAC — hostname-only matches are refused and stay fail open. Review the binding-method counts in `/api/overview` (`bound_hostname` vs `bound_mac`) before enabling; legacy bindings made before the method was recorded are counted as `bound_legacy` |
 
 Advanced overrides (set as Worker variables only when needed):
 `RECOVERY_REFRESH_MINUTES` (`30`), `DETECTION_REFRESH_MINUTES` (`240`),

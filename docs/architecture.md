@@ -155,10 +155,24 @@ flowchart TD
 
 1. Normalize the polled hostname (trim, drop the trailing dot, lowercase) and
    query Cortex by hostname.
-2. Exactly one Cortex endpoint with that hostname → map directly.
-3. Several endpoints share the hostname → intersect their `mac_address[]`
-   sets with the polled MAC. Exactly one match → map and store that MAC as
-   the verified MAC. Zero or multiple matches → leave unmapped (fail open).
+2. **MAC evidence**: intersect the candidates' `mac_address[]` sets with the
+   polled MAC. Exactly one match → bind, method `mac`. A disjoint MAC set
+   never rules a candidate out — the two systems may each name a different
+   adapter of the same machine. Zero matches → continue to step 3. Multiple
+   matches → refuse (`ambiguous`), fail open.
+3. **Unique or liveness-pruned hostname**: a single candidate binds with
+   method `hostname`; several candidates where all but one were last seen
+   more than 30 days ago bind to the live one. Anything else → refuse.
+4. **Contention guard**: a candidate endpoint already bound to a *different*
+   device that still polls (seen within 7 days) is rejected — that is a
+   clone's claim, and sharing an endpoint would let two devices inherit one
+   posture. Two devices in the same poll resolving to one endpoint also
+   reject each other.
+5. The binding's `bind_method` (`mac` / `hostname` / `pinned`) is recorded,
+   and `/api/overview` reports the counts per method. Enable **Require MAC
+   corroboration** in the dashboard to make step 3 refuse (`mac_required`)
+   instead of binding hostname-only matches — check the method counts first
+   to see how many bindings would be affected.
 
 ### Compliance decision (per refreshed endpoint)
 

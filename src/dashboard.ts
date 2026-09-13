@@ -186,6 +186,9 @@ const DASHBOARD_HTML = `<!doctype html>
       <div class="config-field">
         <label><input id="debug-log-enabled" type="checkbox"> Log Cortex traffic</label>
       </div>
+      <div class="config-field">
+        <label><input id="require-mac" type="checkbox"> Require MAC corroboration for new bindings</label>
+      </div>
       <div class="config-actions">
         <button type="button" id="load-lists">Load lists</button>
         <button type="button" id="sync-now">Sync now</button>
@@ -414,6 +417,7 @@ const DASHBOARD_HTML = `<!doctype html>
     document.getElementById("capacity").value = s.listMaxItems;
     document.getElementById("sync-enabled").checked = !!s.listSyncEnabled;
     document.getElementById("debug-log-enabled").checked = s.debugLogEnabled !== false;
+    document.getElementById("require-mac").checked = !!s.requireMacCorroboration;
 
     var flags = [];
     flags.push(payload.cloudflare_api_token_configured ? "Cloudflare API token configured" : "Cloudflare API token missing");
@@ -524,7 +528,8 @@ const DASHBOARD_HTML = `<!doctype html>
       maxContentAgeDays: parseInt(document.getElementById("threshold").value, 10),
       listMaxItems: parseInt(document.getElementById("capacity").value, 10),
       listSyncEnabled: document.getElementById("sync-enabled").checked,
-      debugLogEnabled: document.getElementById("debug-log-enabled").checked
+      debugLogEnabled: document.getElementById("debug-log-enabled").checked,
+      requireMacCorroboration: document.getElementById("require-mac").checked
     };
     if (isNaN(body.maxContentAgeDays) || isNaN(body.listMaxItems)) {
       configMessage("Threshold and capacity must be numbers.");

@@ -3,13 +3,13 @@ import {
   classifyIdentity,
   coverageSummary,
   evaluateEndpoint,
-  findCortexEndpoint,
   needsMacsUnion,
   normalizeHostname,
   normalizeMac,
   normalizeMacCollection,
   normalizeTimestamp,
   parseVerifiedMacs,
+  resolveCortexEndpoint,
 } from "../src/posture";
 import type { CloudflareDevice, CortexEndpoint } from "../src/types";
 
@@ -155,58 +155,110 @@ describe("binding identity drift", () => {
 });
 
 describe("Cortex matching", () => {
-  it("matches a unique hostname without requiring a MAC", () => {
-    expect(findCortexEndpoint(device, [endpoint()])?.endpoint_id).toBe(
-      "cortex-1",
+  it("binds a unique hostname match, corroborating with the MAC when both sides agree", () => {
+    const unique = resolveCortexEndpoint(device, [endpoint()], now);
+    expect(unique.status).toBe("bound");
+    expect(unique.endpoint?.endpoint_id).toBe("cortex-1");
+    expect(unique.method).toBe("mac");
+
+    const noEvidence = resolveCortexEndpoint(
+      { ...device, mac_address: undefined },
+      [endpoint()],
+      now,
     );
-    expect(
-      findCortexEndpoint({ ...device, mac_address: undefined }, [endpoint()])
-        ?.endpoint_id,
-    ).toBe("cortex-1");
-    expect(
-      findCortexEndpoint({ ...device, mac_address: "aa:bb:cc:dd:ee:ff" }, [
-        endpoint(),
-      ])?.endpoint_id,
-    ).toBe("cortex-1");
+    expect(noEvidence.status).toBe("bound");
+    expect(noEvidence.method).toBe("hostname");
+
+    const differingMac = resolveCortexEndpoint(
+      { ...device, mac_address: "aa:bb:cc:dd:ee:ff" },
+      [endpoint()],
+      now,
+    );
+    // A disjoint MAC never rules out a unique-hostname match: the two systems
+    // may each name a different adapter of the same machine.
+    expect(differingMac.status).toBe("bound");
+    expect(differingMac.method).toBe("hostname");
   });
 
-  it("returns null when no hostname matches", () => {
+  it("returns no_match when no hostname matches", () => {
     expect(
-      findCortexEndpoint(device, [endpoint({ endpoint_name: "other-host" })]),
-    ).toBeNull();
+      resolveCortexEndpoint(
+        device,
+        [endpoint({ endpoint_name: "other-host" })],
+        now,
+      ).status,
+    ).toBe("no_match");
     expect(
-      findCortexEndpoint({ ...device, hostname: undefined }, [endpoint()]),
-    ).toBeNull();
+      resolveCortexEndpoint({ ...device, hostname: undefined }, [endpoint()], now)
+        .status,
+    ).toBe("no_match");
   });
 
   it("disambiguates duplicate hostnames with the MAC address", () => {
-    expect(
-      findCortexEndpoint(device, [
-        endpoint(),
-        endpoint({ endpoint_id: "cortex-2", mac_address: ["aa:bb:cc:dd:ee:ff"] }),
-      ])?.endpoint_id,
-    ).toBe("cortex-1");
+    const result = resolveCortexEndpoint(
+      device,
+      [endpoint(), endpoint({ endpoint_id: "cortex-2", mac_address: ["aa:bb:cc:dd:ee:ff"] })],
+      now,
+    );
+    expect(result.status).toBe("bound");
+    expect(result.endpoint?.endpoint_id).toBe("cortex-1");
+    expect(result.method).toBe("mac");
   });
 
-  it("fails a duplicate hostname when the MAC cannot disambiguate", () => {
+  it("refuses a duplicate hostname the MAC cannot disambiguate", () => {
+    const twins = [
+      endpoint(),
+      endpoint({ endpoint_id: "cortex-2" }),
+    ];
     expect(
-      findCortexEndpoint(device, [
-        endpoint(),
-        endpoint({ endpoint_id: "cortex-2" }),
-      ]),
-    ).toBeNull();
+      resolveCortexEndpoint(device, twins, now).status,
+    ).toBe("ambiguous");
     expect(
-      findCortexEndpoint(
+      resolveCortexEndpoint(
         { ...device, mac_address: undefined },
-        [endpoint(), endpoint({ endpoint_id: "cortex-2" })],
-      ),
-    ).toBeNull();
+        twins,
+        now,
+      ).status,
+    ).toBe("ambiguous");
     expect(
-      findCortexEndpoint(
-        { ...device, mac_address: "aa:bb:cc:dd:ee:ff" },
-        [endpoint(), endpoint({ endpoint_id: "cortex-2" })],
-      ),
-    ).toBeNull();
+      resolveCortexEndpoint(
+        { ...device, mac_address: "ff:00:00:00:00:99" },
+        twins,
+        now,
+      ).status,
+    ).toBe("ambiguous");
+  });
+
+  it("liveness-prunes dead duplicate records to a unique hostname bind", () => {
+    const deadTwin = endpoint({
+      endpoint_id: "cortex-dead",
+      mac_address: ["aa:bb:cc:dd:ee:ff"],
+      last_seen: now - 60 * 86_400_000,
+    });
+    const result = resolveCortexEndpoint(
+      { ...device, mac_address: undefined },
+      [endpoint(), deadTwin],
+      now,
+    );
+    expect(result.status).toBe("bound");
+    expect(result.endpoint?.endpoint_id).toBe("cortex-1");
+    expect(result.method).toBe("hostname");
+  });
+
+  it("requires MAC corroboration when the strict setting is on", () => {
+    const strict = resolveCortexEndpoint(device, [endpoint()], now, {
+      requireMac: true,
+    });
+    expect(strict.status).toBe("bound");
+    expect(strict.method).toBe("mac");
+
+    const hostnameOnly = resolveCortexEndpoint(
+      { ...device, mac_address: undefined },
+      [endpoint()],
+      now,
+      { requireMac: true },
+    );
+    expect(hostnameOnly.status).toBe("mac_required");
   });
 });
 

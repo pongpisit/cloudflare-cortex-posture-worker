@@ -1,4 +1,5 @@
 import type {
+  BindMethod,
   CloudflareDevice,
   CortexEndpoint,
   Evaluation,
@@ -20,6 +21,8 @@ interface EvaluationRow {
   hostname: string;
   verified_mac: string;
   verified_macs: string | null;
+  drifted_at: number | null;
+  bind_method: string | null;
   serial_number: string | null;
   last_seen_at: number | null;
 }
@@ -67,6 +70,7 @@ export async function getStoredEvaluations(
       SELECT m.cloudflare_device_id, m.cortex_endpoint_id,
              s.score, s.reason, s.cortex_refreshed_at,
               m.hostname, m.verified_mac, m.verified_macs,
+              m.drifted_at, m.bind_method,
               m.serial_number, m.last_seen_at
       FROM device_mappings m
       LEFT JOIN endpoint_snapshots s
@@ -90,6 +94,8 @@ export async function getStoredEvaluations(
         hostname: row.hostname,
         verifiedMac: row.verified_mac,
         verifiedMacs: parseVerifiedMacs(row.verified_macs, row.verified_mac),
+        driftedAt: row.drifted_at,
+        bindMethod: row.bind_method,
         serialNumber: row.serial_number,
         lastSeenAt: row.last_seen_at,
       });
@@ -464,11 +470,15 @@ export async function saveEndpointSnapshots(
 
 export async function saveDeviceMappings(
   db: D1Database,
-  mappings: Array<{ device: CloudflareDevice; endpoint: CortexEndpoint }>,
+  mappings: Array<{
+    device: CloudflareDevice;
+    endpoint: CortexEndpoint;
+    method?: BindMethod | null;
+  }>,
   observationId: string,
   observedAt: number,
 ): Promise<void> {
-  const statements = mappings.flatMap(({ device, endpoint }) => {
+  const statements = mappings.flatMap(({ device, endpoint, method }) => {
     const deviceMacs = normalizeMacCollection(device.mac_address);
     const endpointMacs = normalizeMacCollection(endpoint.mac_address);
     const verifiedMac = [...deviceMacs].find((mac) => endpointMacs.has(mac)) ?? "";
@@ -500,10 +510,10 @@ export async function saveDeviceMappings(
       db.prepare(
       `INSERT INTO device_mappings(
           cloudflare_device_id, serial_number, cortex_endpoint_id,
-          hostname, verified_mac, verified_macs, status, created_at,
-          updated_at, last_verified_at, last_seen_at
+          hostname, verified_mac, verified_macs, bind_method, status,
+          created_at, updated_at, last_verified_at, last_seen_at
         )
-        SELECT ?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?, ?
+        SELECT ?, ?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?, ?
         WHERE EXISTS (
           SELECT 1 FROM device_observations o
           WHERE o.cloudflare_device_id = ? AND o.observation_id = ?
@@ -514,6 +524,7 @@ export async function saveDeviceMappings(
           hostname = excluded.hostname,
           verified_mac = excluded.verified_mac,
           verified_macs = excluded.verified_macs,
+          bind_method = COALESCE(excluded.bind_method, device_mappings.bind_method),
           drifted_at = NULL,
           status = 'verified',
           updated_at = excluded.updated_at,
@@ -526,6 +537,7 @@ export async function saveDeviceMappings(
       normalizeHostname(device.hostname),
       verifiedMac,
       verifiedMacs,
+      method ?? null,
       observedAt,
       observedAt,
       observedAt,
@@ -580,13 +592,15 @@ export async function updateVerifiedMacs(
 }
 
 // Record that a binding's identity evidence drifted without unbinding it.
-// Written at most once per device (drifted_at IS NULL) so a persistently
-// drifting machine does not multiply write volume.
+// Written at most once per hour per device (drifted_at acts as the drift
+// timestamp and the re-verification throttle) so a persistently drifting
+// machine does not multiply write volume.
 export async function touchMappingDrift(
   db: D1Database,
   deviceIds: string[],
   observationId: string,
   observedAt: number,
+  throttleMs = 60 * 60 * 1000,
 ): Promise<void> {
   if (deviceIds.length === 0) return;
   const statements = deviceIds.map((deviceId) =>
@@ -595,14 +609,14 @@ export async function touchMappingDrift(
         `UPDATE device_mappings
          SET drifted_at = ?
          WHERE cloudflare_device_id = ?
-           AND drifted_at IS NULL
+           AND (drifted_at IS NULL OR drifted_at <= ?)
            AND EXISTS (
              SELECT 1 FROM device_observations o
              WHERE o.cloudflare_device_id = device_mappings.cloudflare_device_id
                AND o.observation_id = ?
            )`,
       )
-      .bind(observedAt, deviceId, observationId),
+      .bind(observedAt, deviceId, observedAt - throttleMs, observationId),
   );
   for (const batch of chunk(statements, 100)) await db.batch(batch);
 }
@@ -752,6 +766,7 @@ export interface AppSettings {
   maxContentAgeDays: number;
   listMaxItems: number;
   debugLogEnabled: boolean;
+  requireMacCorroboration: boolean;
 }
 
 interface AppSettingRow {
@@ -767,6 +782,7 @@ const APP_SETTING_KEYS = [
   "max_content_age_days",
   "list_max_items",
   "debug_log_enabled",
+  "require_mac_corroboration",
 ] as const;
 
 export async function getAppSettings(db: D1Database): Promise<AppSettings> {
@@ -791,6 +807,7 @@ export async function getAppSettings(db: D1Database): Promise<AppSettings> {
     ),
     listMaxItems: settingInt(values.get("list_max_items"), 1, 100_000, 1000),
     debugLogEnabled: values.get("debug_log_enabled") !== "false",
+    requireMacCorroboration: values.get("require_mac_corroboration") === "true",
   };
 }
 
@@ -924,6 +941,10 @@ interface DeviceCountRow {
   verified: number;
   invalid: number;
   drifted: number;
+  bound_mac: number;
+  bound_hostname: number;
+  bound_pinned: number;
+  bound_legacy: number;
 }
 
 export interface DeviceCounts {
@@ -931,6 +952,10 @@ export interface DeviceCounts {
   verified: number;
   invalid: number;
   drifted: number;
+  boundMac: number;
+  boundHostname: number;
+  boundPinned: number;
+  boundLegacy: number;
 }
 
 export async function getDeviceCounts(db: D1Database): Promise<DeviceCounts> {
@@ -940,7 +965,15 @@ export async function getDeviceCounts(db: D1Database): Promise<DeviceCounts> {
               SUM(CASE WHEN status = 'verified' THEN 1 ELSE 0 END) AS verified,
               SUM(CASE WHEN status = 'invalid' THEN 1 ELSE 0 END) AS invalid,
               SUM(CASE WHEN status = 'verified' AND drifted_at IS NOT NULL
-                       THEN 1 ELSE 0 END) AS drifted
+                       THEN 1 ELSE 0 END) AS drifted,
+              SUM(CASE WHEN status = 'verified' AND bind_method = 'mac'
+                       THEN 1 ELSE 0 END) AS bound_mac,
+              SUM(CASE WHEN status = 'verified' AND bind_method = 'hostname'
+                       THEN 1 ELSE 0 END) AS bound_hostname,
+              SUM(CASE WHEN status = 'verified' AND bind_method = 'pinned'
+                       THEN 1 ELSE 0 END) AS bound_pinned,
+              SUM(CASE WHEN status = 'verified' AND bind_method IS NULL
+                       THEN 1 ELSE 0 END) AS bound_legacy
        FROM device_mappings`,
     )
     .first<DeviceCountRow>();
@@ -949,6 +982,10 @@ export async function getDeviceCounts(db: D1Database): Promise<DeviceCounts> {
     verified: row?.verified ?? 0,
     invalid: row?.invalid ?? 0,
     drifted: row?.drifted ?? 0,
+    boundMac: row?.bound_mac ?? 0,
+    boundHostname: row?.bound_hostname ?? 0,
+    boundPinned: row?.bound_pinned ?? 0,
+    boundLegacy: row?.bound_legacy ?? 0,
   };
 }
 
@@ -1163,6 +1200,8 @@ export interface VerifiedMappingInfo {
   hostname: string;
   verifiedMac: string | null;
   verifiedMacs: Set<string>;
+  bindMethod: string | null;
+  lastSeenAt: number | null;
   rediscoveredAt: number | null;
 }
 
@@ -1172,6 +1211,8 @@ interface VerifiedMappingRow {
   hostname: string;
   verified_mac: string | null;
   verified_macs: string | null;
+  bind_method: string | null;
+  last_seen_at: number | null;
   rediscovered_at: number | null;
 }
 
@@ -1185,7 +1226,8 @@ export async function getVerifiedMappingsByEndpointIds(
     const rows = await db
       .prepare(
         `SELECT cloudflare_device_id, cortex_endpoint_id, hostname,
-                verified_mac, verified_macs, rediscovered_at
+                verified_mac, verified_macs, bind_method, last_seen_at,
+                rediscovered_at
          FROM device_mappings
          WHERE status = 'verified'
            AND cortex_endpoint_id IN (${placeholders})`,
@@ -1199,6 +1241,8 @@ export async function getVerifiedMappingsByEndpointIds(
         hostname: row.hostname,
         verifiedMac: row.verified_mac,
         verifiedMacs: parseVerifiedMacs(row.verified_macs, row.verified_mac),
+        bindMethod: row.bind_method,
+        lastSeenAt: row.last_seen_at,
         rediscoveredAt: row.rediscovered_at,
       })),
     );

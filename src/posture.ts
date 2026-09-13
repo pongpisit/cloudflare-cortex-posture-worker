@@ -1,4 +1,5 @@
 import type {
+  BindMethod,
   CloudflareDevice,
   CortexEndpoint,
   Evaluation,
@@ -31,30 +32,80 @@ export function evaluateEndpoint(
   return { score: 100, reason: "content_fresh" };
 }
 
-export function findCortexEndpoint(
+// Bindings are established with a fixed evidence ladder:
+//   1. MAC intersection across hostname candidates - the strongest join the
+//      two systems offer, and the only one that separates clone VMs sharing
+//      a hostname.
+//   2. A unique hostname match - either a single candidate, or several where
+//      all but one are provably dead Cortex records (last seen > 30 days).
+//   3. Anything still ambiguous is refused rather than guessed.
+// With requireMac, step 2 is disabled: only MAC-corroborated binds happen.
+// The liveness window matters because Cortex keeps records for decommissioned
+// machines, and a fresh enrollment must not bind to a dead twin's record.
+const LIVENESS_WINDOW_MS = 30 * 86_400_000;
+
+export interface ResolveOutcome {
+  status: "bound" | "no_match" | "ambiguous" | "mac_required";
+  endpoint: CortexEndpoint | null;
+  method: BindMethod | null;
+}
+
+export function resolveCortexEndpoint(
   device: CloudflareDevice,
   endpoints: CortexEndpoint[],
-): CortexEndpoint | null {
+  now: number,
+  options: { requireMac?: boolean } = {},
+): ResolveOutcome {
   const hostname = normalizeHostname(device.hostname);
-  if (!hostname) return null;
+  if (!hostname) return { status: "no_match", endpoint: null, method: null };
 
-  const byHostname = endpoints.filter(
+  const candidates = endpoints.filter(
     (endpoint) =>
       normalizeHostname(endpoint.endpoint_name ?? endpoint.host_name) ===
       hostname,
   );
-  if (byHostname.length === 0) return null;
-  if (byHostname.length === 1) return byHostname[0] ?? null;
+  if (candidates.length === 0) {
+    return { status: "no_match", endpoint: null, method: null };
+  }
 
-  // Several endpoints share the hostname: disambiguate with the MAC address.
+  const outcome = (
+    status: ResolveOutcome["status"],
+    endpoint: CortexEndpoint | null,
+    method: BindMethod | null,
+  ): ResolveOutcome => ({ status, endpoint, method });
+
+  // Step 1: MAC evidence. A disjoint set never rules a candidate out — the
+  // two systems may each name a different adapter of the same machine.
   const deviceMacs = normalizeMacCollection(device.mac_address);
-  if (deviceMacs.size === 0) return null;
-  const byMac = byHostname.filter((endpoint) => {
-    const endpointMacs = normalizeMacCollection(endpoint.mac_address);
-    return [...deviceMacs].some((mac) => endpointMacs.has(mac));
+  if (deviceMacs.size > 0) {
+    const byMac = candidates.filter((endpoint) => {
+      const endpointMacs = normalizeMacCollection(endpoint.mac_address);
+      return [...deviceMacs].some((mac) => endpointMacs.has(mac));
+    });
+    if (byMac.length === 1) {
+      return outcome("bound", byMac[0] ?? null, "mac");
+    }
+    if (byMac.length > 1) {
+      return outcome("ambiguous", null, null);
+    }
+  }
+
+  if (options.requireMac) {
+    return outcome("mac_required", null, null);
+  }
+
+  // Step 2: unique or liveness-pruned hostname match.
+  if (candidates.length === 1) {
+    return outcome("bound", candidates[0] ?? null, "hostname");
+  }
+  const live = candidates.filter((endpoint) => {
+    const lastSeen = normalizeTimestamp(endpoint.last_seen);
+    return !!lastSeen && now - lastSeen < LIVENESS_WINDOW_MS;
   });
-  if (byMac.length !== 1) return null;
-  return byMac[0] ?? null;
+  if (live.length === 1) {
+    return outcome("bound", live[0] ?? null, "hostname");
+  }
+  return outcome("ambiguous", null, null);
 }
 
 export function normalizeHostname(value: unknown): string {

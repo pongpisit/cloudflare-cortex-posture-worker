@@ -13,10 +13,10 @@ import {
   classifyIdentity,
   coverageSummary,
   evaluateEndpoint,
-  findCortexEndpoint,
   needsMacsUnion,
   normalizeHostname,
   normalizeMacCollection,
+  resolveCortexEndpoint,
 } from "./posture";
 import { ensureSchema } from "./schema";
 import {
@@ -59,6 +59,7 @@ import {
 } from "./repository";
 import type { AppSettings, DeviceCompliance } from "./repository";
 import type {
+  BindMethod,
   CloudflareDevice,
   CortexEndpoint,
   Evaluation,
@@ -226,7 +227,16 @@ export default {
         }
         if (drift !== "confirmed") {
           driftedDeviceIds.push(device.device_id);
-          if (drift === "hostname_drift") discoveries.push(device);
+          // Re-run discovery for a renamed machine at most once per hour:
+          // drifted_at doubles as the throttle, and every drifted poll would
+          // otherwise trigger a Cortex hostname query.
+          if (
+            drift === "hostname_drift" &&
+            (stored.driftedAt === null ||
+              observedAt - stored.driftedAt >= REDISCOVERY_INTERVAL_MS)
+          ) {
+            discoveries.push(device);
+          }
         }
         const reportedMacs = normalizeMacCollection(device.mac_address);
         if (needsMacsUnion(stored.verifiedMacs, reportedMacs)) {
@@ -637,31 +647,109 @@ async function processRefreshMessage(
   ];
   if (hostnames.length === 0) return false;
 
+  const settings = await getAppSettings(env.DB);
   const endpoints = await getEndpointsByHostnames(hostnames, env);
   const matched = new Map<string, CortexEndpoint>();
-  const mappings: Array<{
+  const resolved: Array<{
     device: CloudflareDevice;
     endpoint: CortexEndpoint;
+    method: BindMethod;
   }> = [];
   const now = Date.now();
 
   for (const device of message.devices) {
-    const endpoint = findCortexEndpoint(device, endpoints);
-    if (!endpoint) {
+    const outcome = resolveCortexEndpoint(device, endpoints, now, {
+      requireMac: settings.requireMacCorroboration,
+    });
+    if (outcome.status !== "bound" || !outcome.endpoint || !outcome.method) {
       console.warn(
         JSON.stringify({
           event: "device_mapping_failed",
           cloudflare_device_id: device.device_id,
-          reason: "no_unique_hostname_and_mac_match",
+          reason: outcome.status,
         }),
       );
       continue;
     }
-    matched.set(endpoint.endpoint_id, endpoint);
-    mappings.push({ device, endpoint });
+    resolved.push({ device, endpoint: outcome.endpoint, method: outcome.method });
   }
 
-  await saveDeviceMappings(env.DB, mappings, observationId, observedAt);
+  // Clone-contention guard: an endpoint already bound to a different device
+  // that still polls is the signature of a clone (or of an enrollment that
+  // inherited another machine's identity). Never share an endpoint between
+  // two devices - both would inherit one posture. A claim goes stale after
+  // CLAIM_WINDOW_MS so a decommissioned machine eventually releases its
+  // endpoint to a legitimate new enrollment.
+  const CLAIM_WINDOW_MS = 7 * 86_400_000;
+  const candidateIds = [...new Set(resolved.map((r) => r.endpoint.endpoint_id))];
+  const claims = candidateIds.length
+    ? await getVerifiedMappingsByEndpointIds(env.DB, candidateIds)
+    : [];
+  const activeClaims = new Map<string, string[]>();
+  for (const claim of claims) {
+    const lastSeen = claim.lastSeenAt ?? 0;
+    if (now - lastSeen >= CLAIM_WINDOW_MS) continue;
+    const existing = activeClaims.get(claim.cortexEndpointId) ?? [];
+    existing.push(claim.cloudflareDeviceId);
+    activeClaims.set(claim.cortexEndpointId, existing);
+  }
+
+  const mappings: Array<{
+    device: CloudflareDevice;
+    endpoint: CortexEndpoint;
+    method: BindMethod;
+  }> = [];
+  const inBatchClaims = new Map<string, number>();
+  for (const entry of resolved) {
+    const claimants = activeClaims.get(entry.endpoint.endpoint_id) ?? [];
+    const claimedByOther = claimants.some(
+      (id) => id !== entry.device.device_id,
+    );
+    if (claimedByOther) {
+      console.warn(
+        JSON.stringify({
+          event: "device_mapping_failed",
+          cloudflare_device_id: entry.device.device_id,
+          endpoint_id: entry.endpoint.endpoint_id,
+          reason: "endpoint_claimed_by_active_device",
+        }),
+      );
+      continue;
+    }
+    inBatchClaims.set(
+      entry.endpoint.endpoint_id,
+      (inBatchClaims.get(entry.endpoint.endpoint_id) ?? 0) + 1,
+    );
+    mappings.push(entry);
+  }
+
+  // Two devices in the same poll resolving to one endpoint (twin clones
+  // enrolling together): neither may take it.
+  const disputedIds = new Set(
+    [...inBatchClaims.entries()]
+      .filter(([, count]) => count > 1)
+      .map(([id]) => id),
+  );
+  const bindings = mappings.filter((entry) => {
+    if (disputedIds.has(entry.endpoint.endpoint_id)) {
+      console.warn(
+        JSON.stringify({
+          event: "device_mapping_failed",
+          cloudflare_device_id: entry.device.device_id,
+          endpoint_id: entry.endpoint.endpoint_id,
+          reason: "endpoint_disputed_in_batch",
+        }),
+      );
+      return false;
+    }
+    return true;
+  });
+
+  for (const entry of bindings) {
+    matched.set(entry.endpoint.endpoint_id, entry.endpoint);
+  }
+
+  await saveDeviceMappings(env.DB, bindings, observationId, observedAt);
   await persistEvaluatedEndpoints(
     [...matched.values()],
     env,
@@ -752,8 +840,32 @@ async function rediscoverMissingEndpoints(
           ? { mac_address: [...mapping.verifiedMacs] }
           : {}),
       };
-      const match = findCortexEndpoint(device, endpoints);
-      if (!match) continue;
+      const outcome = resolveCortexEndpoint(device, endpoints, now);
+      if (outcome.status !== "bound" || !outcome.endpoint) continue;
+      const match = outcome.endpoint;
+      // Never re-point onto an endpoint claimed by a different device that
+      // still polls - that is a twin's record, not this machine's.
+      if (match.endpoint_id !== mapping.cortexEndpointId) {
+        const claims = await getVerifiedMappingsByEndpointIds(env.DB, [
+          match.endpoint_id,
+        ]);
+        const claimedByOther = claims.some(
+          (claim) =>
+            claim.cloudflareDeviceId !== mapping.cloudflareDeviceId &&
+            (claim.lastSeenAt ?? 0) > now - 7 * 86_400_000,
+        );
+        if (claimedByOther) {
+          console.warn(
+            JSON.stringify({
+              event: "endpoint_repoint_rejected",
+              cloudflare_device_id: mapping.cloudflareDeviceId,
+              endpoint_id: match.endpoint_id,
+              reason: "endpoint_claimed_by_active_device",
+            }),
+          );
+          continue;
+        }
+      }
       found.set(match.endpoint_id, match);
       if (match.endpoint_id !== mapping.cortexEndpointId) {
         await updateMappingEndpoint(
@@ -1334,6 +1446,14 @@ function parseSettingsUpdate(body: unknown): Record<string, string> {
       throw new ClientError(400, "invalid_debug_log_enabled");
     }
     updates.debug_log_enabled = body.debugLogEnabled ? "true" : "false";
+  }
+  if (body.requireMacCorroboration !== undefined) {
+    if (typeof body.requireMacCorroboration !== "boolean") {
+      throw new ClientError(400, "invalid_require_mac_corroboration");
+    }
+    updates.require_mac_corroboration = body.requireMacCorroboration
+      ? "true"
+      : "false";
   }
   if (body.maxContentAgeDays !== undefined) {
     updates.max_content_age_days = String(

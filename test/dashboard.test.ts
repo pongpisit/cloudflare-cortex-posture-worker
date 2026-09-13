@@ -25,13 +25,26 @@ function fakeDb<T>(rows: T[]): D1Database {
 describe("dashboard repository", () => {
   it("maps device counts", async () => {
     const db = fakeDb([
-      { total: 12, verified: 10, invalid: 2, drifted: 1 },
+      {
+        total: 12,
+        verified: 10,
+        invalid: 2,
+        drifted: 1,
+        bound_mac: 8,
+        bound_hostname: 2,
+        bound_pinned: 0,
+        bound_legacy: 0,
+      },
     ]);
     await expect(getDeviceCounts(db)).resolves.toEqual({
       total: 12,
       verified: 10,
       invalid: 2,
       drifted: 1,
+      boundMac: 8,
+      boundHostname: 2,
+      boundPinned: 0,
+      boundLegacy: 0,
     });
   });
 
@@ -42,6 +55,10 @@ describe("dashboard repository", () => {
       verified: 0,
       invalid: 0,
       drifted: 0,
+      boundMac: 0,
+      boundHostname: 0,
+      boundPinned: 0,
+      boundLegacy: 0,
     });
   });
 
@@ -78,6 +95,7 @@ describe("dashboard repository", () => {
       maxContentAgeDays: 7,
       listMaxItems: 1000,
       debugLogEnabled: true,
+      requireMacCorroboration: false,
     });
   });
 
@@ -90,6 +108,7 @@ describe("dashboard repository", () => {
       { name: "max_content_age_days", value: "14" },
       { name: "list_max_items", value: "5000" },
       { name: "debug_log_enabled", value: "false" },
+      { name: "require_mac_corroboration", value: "true" },
     ]);
     await expect(getAppSettings(db)).resolves.toEqual({
       cloudflareAccountId: "aa8ab6fe5b7f906df426a972033e922a",
@@ -99,6 +118,7 @@ describe("dashboard repository", () => {
       maxContentAgeDays: 14,
       listMaxItems: 5000,
       debugLogEnabled: false,
+      requireMacCorroboration: true,
     });
   });
 

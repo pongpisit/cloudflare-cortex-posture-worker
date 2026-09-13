@@ -11,6 +11,7 @@ const MIGRATION_NAMES = [
   "0010_mapping_rediscovery",
   "0011_device_last_seen",
   "0012_mapping_identity",
+  "0013_bind_method",
 ] as const;
 
 // Idempotent equivalent of migrations 0001-0008, executed as one D1 batch
@@ -33,6 +34,7 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       verified_mac TEXT NOT NULL,
       verified_macs TEXT,
       drifted_at INTEGER,
+      bind_method TEXT,
       status TEXT NOT NULL DEFAULT 'verified',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -175,6 +177,14 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   try {
     await db
       .prepare(`ALTER TABLE device_mappings ADD COLUMN drifted_at INTEGER`)
+      .run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/duplicate column/i.test(message)) throw error;
+  }
+  try {
+    await db
+      .prepare(`ALTER TABLE device_mappings ADD COLUMN bind_method TEXT`)
       .run();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
