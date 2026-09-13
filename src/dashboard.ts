@@ -197,6 +197,7 @@ const DASHBOARD_HTML = `<!doctype html>
         <button type="button" id="load-lists">Load lists</button>
         <button type="button" id="sync-now">Sync now</button>
         <button type="button" id="refresh-all">Refresh all from Cortex</button>
+        <button type="button" id="resync-devices">Resync devices from Cloudflare</button>
         <button type="button" id="coverage-audit">Coverage audit</button>
         <button type="button" id="save-config" class="primary">Save configuration</button>
       </div>
@@ -615,6 +616,30 @@ const DASHBOARD_HTML = `<!doctype html>
       });
   }
 
+  function resyncDevices() {
+    configMessage("Pulling the Cloudflare device inventory\\u2026");
+    mutatingFetch("/api/devices/resync", {
+      method: "POST",
+      headers: { accept: "application/json", "content-type": "application/json" }
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error("resync failed (" + r.status + ")");
+        return r.json();
+      })
+      .then(function (payload) {
+        configMessage(
+          "Inventory " + payload.inventory +
+            " \\u00b7 queued " + payload.discovery_queued +
+            " for discovery \\u00b7 already mapped " + payload.already_mapped +
+            (payload.revoked_skipped ? " \\u00b7 revoked skipped " + payload.revoked_skipped : "")
+        );
+        refresh();
+      })
+      .catch(function (err) {
+        configMessage("Error: " + String(err && err.message ? err.message : err));
+      });
+  }
+
   function coverageAudit() {
     configMessage("Scanning Cortex inventory\\u2026 this can take a while on large fleets");
     mutatingFetch("/api/coverage?windowDays=30", { method: "POST", headers: { accept: "application/json" } })
@@ -985,6 +1010,7 @@ const DASHBOARD_HTML = `<!doctype html>
   document.getElementById("save-config").addEventListener("click", saveConfig);
     document.getElementById("sync-now").addEventListener("click", syncNow);
     document.getElementById("refresh-all").addEventListener("click", refreshAllFromCortex);
+    document.getElementById("resync-devices").addEventListener("click", resyncDevices);
     document.getElementById("coverage-audit").addEventListener("click", coverageAudit);
   document.getElementById("account-select").addEventListener("change", fillListOptions);
 

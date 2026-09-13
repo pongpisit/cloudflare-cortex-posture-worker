@@ -119,7 +119,10 @@ integrity — duplicate or junk serials (common on cloned VMs) can never be
 enforced by a SERIAL list, so they are surfaced rather than silently
 mis-enforced. Machines that should never bind at all — non-persistent VDI
 pools, for instance — can be excluded by hostname pattern so they fail open
-without churning the mapping table.
+without churning the mapping table. A deleted binding self-heals on the
+device's next poll, or immediately via **Resync devices from Cloudflare**,
+which pulls the enrolled WARP inventory and re-queues discovery — restoring
+even offline devices, which the provider cannot report.
 
 For every periodic mechanism and its cadence — how the D1 inventory stays
 current without a nightly bulk import — see the

@@ -30,6 +30,10 @@ applied on the next Cron run without a redeploy:
   mapped endpoint at once — a manual pull of the whole fleet's security
   content into the Worker. Verdicts update within seconds; run **Sync now**
   (or wait for the next Cron cycle) to publish them to the denylist.
+- **Resync devices from Cloudflare** pulls the enrolled WARP inventory from
+  the Zero Trust Devices API and re-queues discovery for every unmapped
+  device — the recovery path when a mapping was deleted while its device is
+  offline (an online device re-discovers itself on its next poll anyway).
 - **Coverage audit** scans the Cortex inventory for endpoints seen in the
   last 30 days and reports how many have a Cloudflare device mapped in D1.
   Uncovered endpoints cannot be enforced until their machines enroll the
@@ -72,6 +76,7 @@ dashboard page itself stay open.
 | `GET /api/overview` | Integration statuses, device counts, noncompliant serial count, sync state |
 | `GET /api/devices?status=all&limit=N` | Per-device compliance rows; `status=all\|noncompliant\|compliant`, `search=<text>`, `limit` 1–500, default 200 |
 | `POST /api/devices/refresh` | Refresh devices from Cortex immediately: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100; or `{"all": true}` to queue the Cron-style refresh for **every mapped endpoint** (returns `refresh_queued`; verdicts publish on the next list sync) |
+| `POST /api/devices/resync` | Pull the enrolled device inventory from the Cloudflare Zero Trust Devices API and queue discovery for every unmapped, non-excluded, non-revoked device. Rebuilds deleted bindings even while the devices are offline (the provider only reports devices when they poll). Returns `inventory`, `discovery_queued`, `already_mapped`, `excluded`, `skipped_no_hostname`, `revoked_skipped`, `truncated` |
 | `POST /api/devices/delete` | Delete devices from tracking: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100. Devices the provider reported in the last 48 hours are refused with 409 — add `"force": true` to override, since deletion removes their serial from the denylist on the next sync |
 | `POST /api/sync` | Run the list synchronization immediately |
 | `POST /api/coverage?windowDays=30` | Diff the recently seen Cortex inventory against D1 mappings; returns `scanned`, `covered`, `uncovered`, `coverage_percent`, `truncated`, and an `uncovered_sample` of up to 100 endpoints |

@@ -31,6 +31,7 @@ structured events include:
 - `device_delete_rejected`
 - `scheduled_refresh`
 - `manual_cortex_refresh_queued`
+- `manual_cloudflare_resync`
 - `cortex_refresh_error`
 
 The Worker refuses to update when the desired count exceeds the configured list
@@ -87,6 +88,17 @@ handled:
   Cortex agent is reinstalled (see
   [endpoint identity over time](../README.md#endpoint-identity-over-time)),
   so re-imaged fleets require no manual reconciliation.
+- **A deleted binding recovers on the next poll — or immediately via resync.**
+  A device that is online re-discovers itself the next time the provider
+  polls. A device that is offline cannot: the provider only reports devices
+  when they poll. **Resync devices from Cloudflare** (or
+  `POST /api/devices/resync`) pulls the enrolled WARP inventory from the
+  Zero Trust Devices API and re-queues discovery for every unmapped device,
+  so deleted bindings rebuild even while the machines are off. Discovery
+  then applies the normal ladder: MAC corroboration, contention guard,
+  operator queue — a duplicate WARP registration of the same machine lands
+  in the queue for an operator decision instead of silently sharing an
+  endpoint.
 - **Binding decisions that need a human land in one place.** Clone contentions
   (two devices claiming one Cortex endpoint), ambiguous twin hostnames, and
   MAC-strict refusals are recorded in the `unbound_devices` queue; identity

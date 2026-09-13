@@ -9,6 +9,7 @@ import {
   type SerialListSyncResult,
 } from "./cloudflare-list";
 import { dashboardPage } from "./dashboard";
+import { listZeroTrustDevices } from "./cloudflare-devices";
 import {
   classifyIdentity,
   coverageSummary,
@@ -143,6 +144,11 @@ export default {
       if (url.pathname === "/api/devices/refresh") {
         if (request.method !== "POST") return methodNotAllowed("POST");
         return await postApiDeviceRefresh(request, env);
+      }
+
+      if (url.pathname === "/api/devices/resync") {
+        if (request.method !== "POST") return methodNotAllowed("POST");
+        return await postApiDevicesResync(env);
       }
 
       if (url.pathname === "/api/devices/delete") {
@@ -1401,6 +1407,88 @@ async function postApiDeviceDelete(
     throw new ClientError(404, "device_not_found");
   }
   return json({ deleted: deleted.length, notFound });
+}
+
+// Rebuild missing bindings from the Cloudflare Zero Trust device inventory.
+// The provider only reports devices when they poll, so a mapping deleted
+// while its device is offline can never come back through /check. This pulls
+// the enrolled inventory directly and feeds every unmapped, non-excluded
+// device through the same discovery queue a poll would use.
+async function postApiDevicesResync(env: Env): Promise<Response> {
+  const settings = await getAppSettings(env.DB);
+  if (!settings.cloudflareAccountId) {
+    throw new ClientError(400, "cloudflare_account_not_configured");
+  }
+  const apiToken = cloudflareApiToken(env);
+  if (!apiToken) throw new ClientError(400, "cloudflare_api_token_missing");
+
+  const inventory = await listZeroTrustDevices(
+    apiToken,
+    settings.cloudflareAccountId,
+  );
+
+  // Devices already bound stay untouched - resync only rebuilds what is
+  // missing.
+  const mapped = new Set(
+    (
+      await getDeviceMappingsByDeviceIds(
+        env.DB,
+        inventory.devices.map((device) => device.device_id),
+      )
+    ).map((mapping) => mapping.cloudflareDeviceId),
+  );
+
+  const patterns = parseHostnamePatterns(settings.vdiHostnamePatterns);
+  let excluded = 0;
+  let skippedNoHostname = 0;
+  const toDiscover: CloudflareDevice[] = [];
+  for (const device of inventory.devices) {
+    if (mapped.has(device.device_id)) continue;
+    if (matchesHostnamePattern(device.hostname, patterns)) {
+      excluded += 1;
+      continue;
+    }
+    if (!device.hostname?.trim()) {
+      skippedNoHostname += 1;
+      continue;
+    }
+    toDiscover.push(device);
+  }
+
+  if (toDiscover.length > 0) {
+    const observationId = crypto.randomUUID();
+    const observedAt = Date.now();
+    await saveDeviceObservations(
+      env.DB,
+      toDiscover.map((device) => device.device_id),
+      observationId,
+      observedAt,
+    );
+    await enqueueDiscoveries(
+      env.REFRESH_QUEUE,
+      toDiscover,
+      observationId,
+      observedAt,
+    );
+  }
+
+  console.log(
+    JSON.stringify({
+      event: "manual_cloudflare_resync",
+      inventory: inventory.devices.length,
+      queued: toDiscover.length,
+    }),
+  );
+
+  return json({
+    inventory: inventory.devices.length,
+    already_mapped: mapped.size,
+    revoked_skipped: inventory.revoked,
+    excluded,
+    skipped_no_hostname: skippedNoHostname,
+    discovery_queued: toDiscover.length,
+    truncated: inventory.truncated,
+  });
 }
 
 async function postApiSync(env: Env): Promise<Response> {
