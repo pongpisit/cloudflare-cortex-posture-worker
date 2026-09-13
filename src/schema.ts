@@ -10,6 +10,7 @@ const MIGRATION_NAMES = [
   "0009_debug_log",
   "0010_mapping_rediscovery",
   "0011_device_last_seen",
+  "0012_mapping_identity",
 ] as const;
 
 // Idempotent equivalent of migrations 0001-0008, executed as one D1 batch
@@ -30,6 +31,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       cortex_endpoint_id TEXT NOT NULL,
       hostname TEXT NOT NULL,
       verified_mac TEXT NOT NULL,
+      verified_macs TEXT,
+      drifted_at INTEGER,
       status TEXT NOT NULL DEFAULT 'verified',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -145,6 +148,33 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   try {
     await db
       .prepare(`ALTER TABLE device_mappings ADD COLUMN last_seen_at INTEGER`)
+      .run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/duplicate column/i.test(message)) throw error;
+  }
+  try {
+    await db
+      .prepare(`ALTER TABLE device_mappings ADD COLUMN verified_macs TEXT`)
+      .run();
+    // One-time backfill: seed the MAC set from the legacy single value. Runs
+    // only when the column was just added so steady-state requests never scan
+    // the table.
+    await db
+      .prepare(
+        `UPDATE device_mappings
+         SET verified_macs = json_array(verified_mac)
+         WHERE verified_macs IS NULL
+           AND TRIM(COALESCE(verified_mac, '')) != ''`,
+      )
+      .run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/duplicate column/i.test(message)) throw error;
+  }
+  try {
+    await db
+      .prepare(`ALTER TABLE device_mappings ADD COLUMN drifted_at INTEGER`)
       .run();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

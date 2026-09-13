@@ -10,11 +10,13 @@ import {
 } from "./cloudflare-list";
 import { dashboardPage } from "./dashboard";
 import {
+  classifyIdentity,
   coverageSummary,
   evaluateEndpoint,
   findCortexEndpoint,
+  needsMacsUnion,
   normalizeHostname,
-  normalizeMac,
+  normalizeMacCollection,
 } from "./posture";
 import { ensureSchema } from "./schema";
 import {
@@ -51,7 +53,9 @@ import {
   saveDeviceMappings,
   saveEndpointSnapshots,
   touchDeviceLastSeen,
+  touchMappingDrift,
   updateVerifiedDeviceSerials,
+  updateVerifiedMacs,
 } from "./repository";
 import type { AppSettings, DeviceCompliance } from "./repository";
 import type {
@@ -171,6 +175,8 @@ export default {
       const discoveries: CloudflareDevice[] = [];
       const missingSnapshots = new Set<string>();
       const invalidDeviceIds: string[] = [];
+      const driftedDeviceIds: string[] = [];
+      const macUnionUpdates: Array<{ deviceId: string; macs: string[] }> = [];
       const serialUpdates: Array<{
         deviceId: string;
         serialNumber: string | null;
@@ -190,21 +196,31 @@ export default {
 
         const currentSerial = device.serial_number?.trim() || null;
         const storedSerial = stored.serialNumber?.trim() || null;
-        // The mapping identity is hostname + MAC: a rename or a NIC change
-        // invalidates the mapping and triggers re-discovery. Serial-number
+        // The mapping identity is the device_id -> endpoint_id binding.
+        // Hostname and MAC are drift evidence, not the key: a rename or a NIC
+        // change marks the binding as drifted while the last verdict keeps
+        // serving, because unbinding on drift would let a stale machine
+        // escape the denylist simply by renaming itself. Only hostname and
+        // MAC changing together is treated as a replacement. Serial-number
         // changes never invalidate; they flow through the silent update path
         // below so the denylist entry follows the current serial.
-        const currentMac = normalizeMac(device.mac_address);
-        const identityChanged =
-          normalizeHostname(device.hostname) !== stored.hostname ||
-          Boolean(
-            stored.verifiedMac && currentMac && stored.verifiedMac !== currentMac,
-          );
-        if (identityChanged) {
+        const drift = classifyIdentity(device, stored);
+        if (drift === "replaced") {
           result[device.device_id] = { s2s_id: "", score: 0 };
           invalidDeviceIds.push(device.device_id);
           discoveries.push(device);
           continue;
+        }
+        if (drift !== "confirmed") {
+          driftedDeviceIds.push(device.device_id);
+          if (drift === "hostname_drift") discoveries.push(device);
+        }
+        const reportedMacs = normalizeMacCollection(device.mac_address);
+        if (needsMacsUnion(stored.verifiedMacs, reportedMacs)) {
+          macUnionUpdates.push({
+            deviceId: device.device_id,
+            macs: [...new Set([...stored.verifiedMacs, ...reportedMacs])],
+          });
         }
 
         if (!stored.lastSeenAt || observedAt - stored.lastSeenAt > touchAfter) {
@@ -251,6 +267,8 @@ export default {
           ...new Set([
             ...discoveries.map((device) => device.device_id),
             ...invalidDeviceIds,
+            ...driftedDeviceIds,
+            ...macUnionUpdates.map((update) => update.deviceId),
             ...serialUpdates.map((update) => update.deviceId),
           ]),
         ],
@@ -260,6 +278,18 @@ export default {
 
       await Promise.all([
         invalidateDeviceMappings(env.DB, invalidDeviceIds, observationId),
+        touchMappingDrift(
+          env.DB,
+          driftedDeviceIds,
+          observationId,
+          observedAt,
+        ),
+        updateVerifiedMacs(
+          env.DB,
+          macUnionUpdates,
+          observationId,
+          observedAt,
+        ),
         updateVerifiedDeviceSerials(
           env.DB,
           serialUpdates,
@@ -305,6 +335,8 @@ export default {
           devices: devices.length,
           mapped: evaluations.size,
           discovery_queued: discoveries.length,
+          identity_drifted: driftedDeviceIds.length,
+          macs_absorbed: macUnionUpdates.length,
           stale_fail_open: staleCount,
         }),
       );
@@ -703,8 +735,8 @@ async function rediscoverMissingEndpoints(
       const device: CloudflareDevice = {
         device_id: mapping.cloudflareDeviceId,
         hostname: mapping.hostname,
-        ...(mapping.verifiedMac
-          ? { mac_address: mapping.verifiedMac }
+        ...(mapping.verifiedMacs.size > 0
+          ? { mac_address: [...mapping.verifiedMacs] }
           : {}),
       };
       const match = findCortexEndpoint(device, endpoints);

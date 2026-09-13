@@ -129,15 +129,25 @@ by a policy.
 flowchart TD
     P["Polled device"] --> K{"Mapping exists?"}
     K -->|"no"| D["Queue discovery"]
-    K -->|"yes"| I{"Hostname and MAC match?"}
-    I -->|"no"| V["Invalidate, tombstone old serial, rediscover"]
-    I -->|"yes"| S{"Serial changed?"}
+    K -->|"yes"| I{"Hostname and MAC vs stored binding"}
+    I -->|"both changed"| V["Invalidate, tombstone old serial, rediscover"]
+    I -->|"rename only"| G["Mark drifted, keep verdict, rediscover under new hostname"]
+    I -->|"MACs disjoint"| M["Mark drifted, keep verdict"]
+    I -->|"confirmed"| S{"Serial changed?"}
     S -->|"yes"| U["Silent update, denylist follows new serial"]
     S -->|"no"| R["Return snapshot score"]
 ```
 
-- A MAC change only invalidates when both the stored MAC and the polled MAC
-  are present and different. A poll without a MAC never invalidates.
+- MAC comparison is set-based: every MAC the poll reports must be unknown to
+  the binding's verified MAC set before drift is declared, and either side
+  being empty never counts as drift. A multi-NIC machine whose reported MAC
+  ordering changes is always confirmed, and a newly observed MAC appearing
+  alongside a known one is absorbed into the set.
+- Drift never unbinds a device. The last verdict keeps serving while the
+  binding is flagged, because unbinding on a rename or a NIC change would let
+  a stale machine escape the denylist by renaming itself.
+- Hostname and MAC changing together is the replacement signature (clone or
+  re-provisioned enrollment) and does unbind: invalidate, tombstone, rediscover.
 - A serial change never invalidates the mapping — it is silently updated so
   the denylist entry follows the current hardware.
 

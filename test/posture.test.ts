@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  classifyIdentity,
   coverageSummary,
   evaluateEndpoint,
   findCortexEndpoint,
+  needsMacsUnion,
   normalizeHostname,
   normalizeMac,
   normalizeMacCollection,
   normalizeTimestamp,
+  parseVerifiedMacs,
 } from "../src/posture";
 import type { CloudflareDevice, CortexEndpoint } from "../src/types";
 
@@ -48,6 +51,106 @@ describe("device normalization", () => {
     expect(normalizeMac(undefined)).toBeNull();
     expect(normalizeMac("")).toBeNull();
     expect(normalizeMac("not-a-mac")).toBeNull();
+  });
+
+  it("parses the verified MAC set with legacy fallback", () => {
+    expect(
+      [...parseVerifiedMacs('["001122334455","aabbccddeeff"]', null)].sort(),
+    ).toEqual(["001122334455", "aabbccddeeff"]);
+    expect([...parseVerifiedMacs(null, "00-11-22-33-44-55")]).toEqual([
+      "001122334455",
+    ]);
+    expect([...parseVerifiedMacs(null, null)]).toEqual([]);
+    expect([...parseVerifiedMacs("{corrupt", "00-11-22-33-44-55")]).toEqual([
+      "001122334455",
+    ]);
+    expect([...parseVerifiedMacs('["not-a-mac"]', null)]).toEqual([]);
+  });
+});
+
+describe("binding identity drift", () => {
+  const MAC_A = "00:11:22:33:44:55";
+  const MAC_B = "aa:bb:cc:dd:ee:ff";
+  const stored = {
+    hostname: "laptop-001",
+    verifiedMacs: new Set(["001122334455", "aabbccddeeff"]),
+  };
+
+  it("stays confirmed for any subset of a multi-NIC MAC set", () => {
+    // Regression for the churn loop: comparing the first reported MAC against
+    // a single stored MAC invalidated multi-NIC machines on every poll.
+    expect(classifyIdentity(device, stored)).toBe("confirmed");
+    expect(
+      classifyIdentity({ ...device, mac_address: [MAC_B] }, stored),
+    ).toBe("confirmed");
+    expect(
+      classifyIdentity({ ...device, mac_address: [MAC_B, MAC_A] }, stored),
+    ).toBe("confirmed");
+    expect(
+      classifyIdentity(
+        { ...device, mac_address: ["ff:ee:dd:cc:bb:aa", MAC_A] },
+        stored,
+      ),
+    ).toBe("confirmed");
+  });
+
+  it("flags mac drift only when every reported MAC is unknown", () => {
+    expect(
+      classifyIdentity(
+        { ...device, mac_address: "ff-ee-dd-cc-bb-aa" },
+        stored,
+      ),
+    ).toBe("mac_drift");
+    expect(
+      classifyIdentity(
+        { ...device, mac_address: ["ff:ee:dd:cc:bb:aa", MAC_B] },
+        stored,
+      ),
+    ).toBe("confirmed");
+  });
+
+  it("never reports mac drift without evidence on both sides", () => {
+    expect(
+      classifyIdentity({ ...device, mac_address: "ff-ee-dd-cc-bb-aa" }, {
+        hostname: "laptop-001",
+        verifiedMacs: new Set<string>(),
+      }),
+    ).toBe("confirmed");
+    expect(
+      classifyIdentity({ ...device, mac_address: undefined }, stored),
+    ).toBe("confirmed");
+  });
+
+  it("flags hostname drift when the rename keeps MAC evidence", () => {
+    expect(
+      classifyIdentity({ ...device, hostname: "laptop-002" }, stored),
+    ).toBe("hostname_drift");
+  });
+
+  it("flags a replacement when hostname and MAC change together", () => {
+    expect(
+      classifyIdentity(
+        { ...device, hostname: "laptop-002", mac_address: "ff-ee-dd-cc-bb-aa" },
+        stored,
+      ),
+    ).toBe("replaced");
+  });
+
+  it("absorbs newly observed MACs only alongside a known MAC", () => {
+    const setA = new Set(["001122334455"]);
+    expect(
+      needsMacsUnion(setA, normalizeMacCollection([MAC_A])),
+    ).toBe(false);
+    expect(
+      needsMacsUnion(setA, normalizeMacCollection([MAC_A, MAC_B])),
+    ).toBe(true);
+    expect(
+      needsMacsUnion(setA, normalizeMacCollection([MAC_B])),
+    ).toBe(false);
+    expect(
+      needsMacsUnion(new Set<string>(), normalizeMacCollection([MAC_B])),
+    ).toBe(true);
+    expect(needsMacsUnion(setA, normalizeMacCollection(undefined))).toBe(false);
   });
 });
 

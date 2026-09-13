@@ -26,6 +26,7 @@ export interface StoredEvaluation {
   cortexRefreshedAt: number | null;
   hostname: string;
   verifiedMac: string;
+  verifiedMacs: Set<string>;
   serialNumber: string | null;
   lastSeenAt: number | null;
 }

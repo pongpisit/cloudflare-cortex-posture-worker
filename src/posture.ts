@@ -80,9 +80,95 @@ export function normalizeMacCollection(value: unknown): Set<string> {
 }
 
 // Normalized form of a single reported MAC address, or null when the poll
-// carries none. Compared against the mapping's verified MAC on every /check.
+// carries none. Seeds the verified MAC set from the legacy single-value
+// column when the JSON set has not been populated yet.
 export function normalizeMac(value: unknown): string | null {
   return [...normalizeMacCollection(value)][0] ?? null;
+}
+
+// Outcome of comparing a polled device against its stored binding identity.
+//
+// - "confirmed": hostname and MAC evidence agree with the binding.
+// - "mac_drift": hostname agrees, but every reported MAC is unknown. Likely a
+//   NIC swap or VM reconfiguration on the same machine.
+// - "hostname_drift": MAC evidence agrees but the hostname changed. The
+//   machine was probably renamed.
+// - "replaced": both signals changed simultaneously, which is the signature of
+//   a different machine (for example a clone) inheriting the enrollment.
+export type IdentityDrift =
+  | "confirmed"
+  | "mac_drift"
+  | "hostname_drift"
+  | "replaced";
+
+export function classifyIdentity(
+  device: Pick<CloudflareDevice, "hostname" | "mac_address">,
+  stored: { hostname: string; verifiedMacs: Set<string> },
+): IdentityDrift {
+  const hostnameChanged =
+    normalizeHostname(device.hostname) !== stored.hostname;
+  const reportedMacs = normalizeMacCollection(device.mac_address);
+  // MAC drift requires evidence on both sides: an empty stored set (mapping
+  // was never corroborated) or an empty reported set (poll carried no MAC)
+  // must never be treated as drift.
+  const macChanged =
+    stored.verifiedMacs.size > 0 &&
+    reportedMacs.size > 0 &&
+    isDisjoint(stored.verifiedMacs, reportedMacs);
+
+  if (hostnameChanged && macChanged) return "replaced";
+  if (hostnameChanged) return "hostname_drift";
+  if (macChanged) return "mac_drift";
+  return "confirmed";
+}
+
+function isDisjoint(a: Set<string>, b: Set<string>): boolean {
+  for (const value of a) {
+    if (b.has(value)) return false;
+  }
+  return true;
+}
+
+// Whether a confirmed poll should persist newly observed MAC addresses into
+// the verified set. Absorbs a docked adapter, a switched primary NIC, or a
+// Wi-Fi randomization rotation without treating them as drift. Disjoint sets
+// are never absorbed — they are classified as mac_drift instead.
+export function needsMacsUnion(
+  stored: Set<string>,
+  reported: Set<string>,
+): boolean {
+  if (reported.size === 0) return false;
+  if (stored.size === 0) return true;
+  let overlap = 0;
+  for (const mac of reported) {
+    if (stored.has(mac)) overlap += 1;
+  }
+  if (overlap === 0) return false;
+  return reported.size > overlap;
+}
+
+// Parse the verified MAC set from the JSON column, falling back to the legacy
+// single-value column when the JSON is absent or corrupt.
+export function parseVerifiedMacs(
+  json: string | null | undefined,
+  legacyMac: string | null | undefined,
+): Set<string> {
+  const result = new Set<string>();
+  if (json) {
+    try {
+      const parsed: unknown = JSON.parse(json);
+      if (Array.isArray(parsed)) {
+        for (const mac of normalizeMacCollection(parsed)) result.add(mac);
+      }
+    } catch {
+      // Corrupt JSON falls through to the legacy column.
+    }
+  }
+  if (result.size === 0) {
+    const legacy = normalizeMac(legacyMac);
+    if (legacy) result.add(legacy);
+  }
+  return result;
 }
 
 export interface CoverageSummary {

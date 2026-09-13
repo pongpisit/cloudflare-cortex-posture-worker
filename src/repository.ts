@@ -8,6 +8,7 @@ import {
   normalizeHostname,
   normalizeMacCollection,
   normalizeTimestamp,
+  parseVerifiedMacs,
 } from "./posture";
 
 interface EvaluationRow {
@@ -18,6 +19,7 @@ interface EvaluationRow {
   cortex_refreshed_at: number | null;
   hostname: string;
   verified_mac: string;
+  verified_macs: string | null;
   serial_number: string | null;
   last_seen_at: number | null;
 }
@@ -64,7 +66,8 @@ export async function getStoredEvaluations(
     const query = `
       SELECT m.cloudflare_device_id, m.cortex_endpoint_id,
              s.score, s.reason, s.cortex_refreshed_at,
-              m.hostname, m.verified_mac, m.serial_number, m.last_seen_at
+              m.hostname, m.verified_mac, m.verified_macs,
+              m.serial_number, m.last_seen_at
       FROM device_mappings m
       LEFT JOIN endpoint_snapshots s
         ON s.cortex_endpoint_id = m.cortex_endpoint_id
@@ -86,6 +89,7 @@ export async function getStoredEvaluations(
         cortexRefreshedAt: row.cortex_refreshed_at,
         hostname: row.hostname,
         verifiedMac: row.verified_mac,
+        verifiedMacs: parseVerifiedMacs(row.verified_macs, row.verified_mac),
         serialNumber: row.serial_number,
         lastSeenAt: row.last_seen_at,
       });
@@ -468,6 +472,13 @@ export async function saveDeviceMappings(
     const deviceMacs = normalizeMacCollection(device.mac_address);
     const endpointMacs = normalizeMacCollection(endpoint.mac_address);
     const verifiedMac = [...deviceMacs].find((mac) => endpointMacs.has(mac)) ?? "";
+    // The verified set is the union of both systems' MAC observations:
+    // Cloudflare and Cortex may each name a different adapter on the same
+    // multi-NIC machine, so the intersection alone would leave the set empty
+    // and disable drift detection.
+    const verifiedMacs = JSON.stringify([
+      ...new Set([...deviceMacs, ...endpointMacs]),
+    ]);
     const serialNumber = device.serial_number?.trim() || null;
     return [
       db
@@ -489,10 +500,10 @@ export async function saveDeviceMappings(
       db.prepare(
       `INSERT INTO device_mappings(
           cloudflare_device_id, serial_number, cortex_endpoint_id,
-          hostname, verified_mac, status, created_at, updated_at,
-          last_verified_at, last_seen_at
+          hostname, verified_mac, verified_macs, status, created_at,
+          updated_at, last_verified_at, last_seen_at
         )
-        SELECT ?, ?, ?, ?, ?, 'verified', ?, ?, ?, ?
+        SELECT ?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?, ?
         WHERE EXISTS (
           SELECT 1 FROM device_observations o
           WHERE o.cloudflare_device_id = ? AND o.observation_id = ?
@@ -502,6 +513,8 @@ export async function saveDeviceMappings(
           cortex_endpoint_id = excluded.cortex_endpoint_id,
           hostname = excluded.hostname,
           verified_mac = excluded.verified_mac,
+          verified_macs = excluded.verified_macs,
+          drifted_at = NULL,
           status = 'verified',
           updated_at = excluded.updated_at,
           last_verified_at = excluded.last_verified_at,
@@ -512,6 +525,7 @@ export async function saveDeviceMappings(
       endpoint.endpoint_id,
       normalizeHostname(device.hostname),
       verifiedMac,
+      verifiedMacs,
       observedAt,
       observedAt,
       observedAt,
@@ -533,6 +547,63 @@ export async function saveDeviceMappings(
         .bind(serialNumber, device.device_id, serialNumber),
     ];
   });
+  for (const batch of chunk(statements, 100)) await db.batch(batch);
+}
+
+// Absorb newly observed MAC addresses into the verified set of a confirmed
+// binding. One write per actual change (a docked adapter, a rotated Wi-Fi
+// MAC), never on the steady-state hot path.
+export async function updateVerifiedMacs(
+  db: D1Database,
+  updates: Array<{ deviceId: string; macs: string[] }>,
+  observationId: string,
+  observedAt: number,
+): Promise<void> {
+  if (updates.length === 0) return;
+  const statements = updates.map(({ deviceId, macs }) =>
+    db
+      .prepare(
+        `UPDATE device_mappings
+         SET verified_macs = ?,
+             verified_mac = COALESCE(NULLIF(verified_mac, ''), ?),
+             updated_at = ?
+         WHERE cloudflare_device_id = ?
+           AND EXISTS (
+             SELECT 1 FROM device_observations o
+             WHERE o.cloudflare_device_id = device_mappings.cloudflare_device_id
+               AND o.observation_id = ?
+           )`,
+      )
+      .bind(JSON.stringify(macs), macs[0] ?? "", observedAt, deviceId, observationId),
+  );
+  for (const batch of chunk(statements, 100)) await db.batch(batch);
+}
+
+// Record that a binding's identity evidence drifted without unbinding it.
+// Written at most once per device (drifted_at IS NULL) so a persistently
+// drifting machine does not multiply write volume.
+export async function touchMappingDrift(
+  db: D1Database,
+  deviceIds: string[],
+  observationId: string,
+  observedAt: number,
+): Promise<void> {
+  if (deviceIds.length === 0) return;
+  const statements = deviceIds.map((deviceId) =>
+    db
+      .prepare(
+        `UPDATE device_mappings
+         SET drifted_at = ?
+         WHERE cloudflare_device_id = ?
+           AND drifted_at IS NULL
+           AND EXISTS (
+             SELECT 1 FROM device_observations o
+             WHERE o.cloudflare_device_id = device_mappings.cloudflare_device_id
+               AND o.observation_id = ?
+           )`,
+      )
+      .bind(observedAt, deviceId, observationId),
+  );
   for (const batch of chunk(statements, 100)) await db.batch(batch);
 }
 
@@ -852,12 +923,14 @@ interface DeviceCountRow {
   total: number;
   verified: number;
   invalid: number;
+  drifted: number;
 }
 
 export interface DeviceCounts {
   total: number;
   verified: number;
   invalid: number;
+  drifted: number;
 }
 
 export async function getDeviceCounts(db: D1Database): Promise<DeviceCounts> {
@@ -865,7 +938,9 @@ export async function getDeviceCounts(db: D1Database): Promise<DeviceCounts> {
     .prepare(
       `SELECT COUNT(*) AS total,
               SUM(CASE WHEN status = 'verified' THEN 1 ELSE 0 END) AS verified,
-              SUM(CASE WHEN status = 'invalid' THEN 1 ELSE 0 END) AS invalid
+              SUM(CASE WHEN status = 'invalid' THEN 1 ELSE 0 END) AS invalid,
+              SUM(CASE WHEN status = 'verified' AND drifted_at IS NOT NULL
+                       THEN 1 ELSE 0 END) AS drifted
        FROM device_mappings`,
     )
     .first<DeviceCountRow>();
@@ -873,6 +948,7 @@ export async function getDeviceCounts(db: D1Database): Promise<DeviceCounts> {
     total: row?.total ?? 0,
     verified: row?.verified ?? 0,
     invalid: row?.invalid ?? 0,
+    drifted: row?.drifted ?? 0,
   };
 }
 
@@ -1086,6 +1162,7 @@ export interface VerifiedMappingInfo {
   cortexEndpointId: string;
   hostname: string;
   verifiedMac: string | null;
+  verifiedMacs: Set<string>;
   rediscoveredAt: number | null;
 }
 
@@ -1094,6 +1171,7 @@ interface VerifiedMappingRow {
   cortex_endpoint_id: string;
   hostname: string;
   verified_mac: string | null;
+  verified_macs: string | null;
   rediscovered_at: number | null;
 }
 
@@ -1107,7 +1185,7 @@ export async function getVerifiedMappingsByEndpointIds(
     const rows = await db
       .prepare(
         `SELECT cloudflare_device_id, cortex_endpoint_id, hostname,
-                verified_mac, rediscovered_at
+                verified_mac, verified_macs, rediscovered_at
          FROM device_mappings
          WHERE status = 'verified'
            AND cortex_endpoint_id IN (${placeholders})`,
@@ -1120,6 +1198,7 @@ export async function getVerifiedMappingsByEndpointIds(
         cortexEndpointId: row.cortex_endpoint_id,
         hostname: row.hostname,
         verifiedMac: row.verified_mac,
+        verifiedMacs: parseVerifiedMacs(row.verified_macs, row.verified_mac),
         rediscoveredAt: row.rediscovered_at,
       })),
     );

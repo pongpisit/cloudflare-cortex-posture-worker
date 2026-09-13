@@ -24,11 +24,14 @@ function fakeDb<T>(rows: T[]): D1Database {
 
 describe("dashboard repository", () => {
   it("maps device counts", async () => {
-    const db = fakeDb([{ total: 12, verified: 10, invalid: 2 }]);
+    const db = fakeDb([
+      { total: 12, verified: 10, invalid: 2, drifted: 1 },
+    ]);
     await expect(getDeviceCounts(db)).resolves.toEqual({
       total: 12,
       verified: 10,
       invalid: 2,
+      drifted: 1,
     });
   });
 
@@ -38,6 +41,7 @@ describe("dashboard repository", () => {
       total: 0,
       verified: 0,
       invalid: 0,
+      drifted: 0,
     });
   });
 

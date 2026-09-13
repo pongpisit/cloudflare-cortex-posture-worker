@@ -9,10 +9,13 @@ list as a block condition, so noncompliant devices lose access without any
 per-request evaluation for healthy devices — and unknown devices intentionally
 fail open until a later discovery and refresh cycle confirms they are stale.
 
-A device is mapped to exactly one Cortex endpoint by **normalized hostname plus
-MAC address**. The hardware serial number is never used for matching; it is
-only the enforcement key written to the denylist, and it follows the device
-automatically if it changes.
+A device is mapped to exactly one Cortex endpoint once, using the
+normalized hostname disambiguated by MAC address when several Cortex
+endpoints share that hostname. From then on the binding is the pair of stable
+keys — Cloudflare `device_id` and Cortex `endpoint_id` — and every observed MAC
+is kept in a verified MAC set. The hardware serial number is never used for
+matching; it is only the enforcement key written to the denylist, and it
+follows the device automatically if it changes.
 
 The stale-content threshold defaults to seven days and is managed from the
 operations dashboard, along with every other operational setting. The Worker
@@ -76,15 +79,23 @@ set is published to Cloudflare policy.
 
 ### Endpoint identity over time
 
-The mapping identity is **hostname + MAC**: a rename or a NIC change
-invalidates the mapping and triggers re-discovery. `endpoint_id` is Cortex's
-stable key, so refreshes are keyed by ID. Mappings stay correct as the fleet
-changes:
+The binding is the pair **Cloudflare `device_id` → Cortex `endpoint_id`**,
+established once with hostname + MAC evidence. Hostname and MAC are not the
+key — they are drift signals watched on every poll:
 
-- Every `/check` re-verifies each stored mapping against current inventory.
-  A hostname or MAC change invalidates the mapping, writes a removal tombstone
-  for the old serial, and triggers re-discovery under the new identity.
-- A serial-number change never invalidates a mapping. The denylist entry
+- A MAC change on the same hostname (a swapped NIC, a VM reconfiguration, a
+  docked adapter) marks the binding as drifted. The last verdict keeps
+  serving, so a stale device cannot escape the denylist by changing its MAC.
+  Newly observed MACs are absorbed into the verified set whenever they appear
+  alongside a known one.
+- A rename with MAC evidence intact marks the binding as drifted and re-runs
+  discovery under the new hostname, again without dropping the current
+  verdict. Renaming no longer removes a device from the denylist.
+- Hostname and MAC changing together is treated as a replacement (the
+  signature of a clone or a re-provisioned enrollment): the mapping is
+  invalidated, a removal tombstone is written for the old serial, and
+  re-discovery starts from scratch.
+- A serial-number change never invalidates a binding. The denylist entry
   silently follows the current serial, so hardware replacements never leave a
   stale block in place.
 - An endpoint that no longer exists in Cortex fails open: its snapshot is
@@ -95,7 +106,7 @@ changes:
   the mapping is re-pointed to the current endpoint and the snapshot is
   restored.
 - Identity checks tolerate missing data: a poll that omits the MAC never
-  invalidates a mapping that has one, and vice versa.
+  triggers drift on a mapping that has one, and vice versa.
 
 For every periodic mechanism and its cadence — how the D1 inventory stays
 current without a nightly bulk import — see the
