@@ -606,9 +606,21 @@ const DASHBOARD_HTML = `<!doctype html>
         return r.json();
       })
       .then(function (payload) {
-        configMessage(
-          "Queued " + payload.refresh_queued + " endpoint(s) for Cortex refresh \\u00b7 verdicts publish on the next sync"
-        );
+        var message;
+        if (payload.mode === "async") {
+          message =
+            "Queued " + payload.refresh_queued + " endpoint(s) for Cortex refresh \\u00b7 verdicts publish on the next sync";
+        } else {
+          message = "Refreshed " + payload.refreshed_endpoints + " endpoint(s)";
+          if (payload.synced) {
+            message += " \\u00b7 synced now \\u00b7 changed=" + payload.changed + " \\u00b7 count=" + payload.count;
+          } else if (payload.sync_error) {
+            message += " \\u00b7 sync failed: " + payload.sync_error;
+          } else {
+            message += " \\u00b7 list sync is not enabled";
+          }
+        }
+        configMessage(message);
         refresh();
       })
       .catch(function (err) {

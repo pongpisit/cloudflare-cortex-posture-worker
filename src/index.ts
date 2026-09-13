@@ -85,6 +85,11 @@ const MAX_DEVICES = 1000;
 // force flag. last_seen_at is touched at most once per day, so the window
 // covers the full touch cadence plus a day of margin.
 const RECENTLY_SEEN_DELETE_GUARD_MS = 48 * 60 * 60 * 1000;
+// "Refresh all" processes the fleet inline (5 sequential Cortex calls of 100
+// endpoints each, a few seconds) and publishes immediately when it fits this
+// ceiling. Larger fleets fall back to the same queue Cron uses, since one
+// HTTP request cannot reliably page through thousands of Cortex calls.
+const SYNC_REFRESH_ALL_LIMIT = 500;
 
 let schemaEnsured = false;
 
@@ -1245,19 +1250,64 @@ async function postApiDeviceRefresh(
       throw new ClientError(400, "invalid_all_flag");
     }
     if (!body.all) throw new ClientError(400, "device_id_required");
-    // Fleet-wide manual sync: enqueue the same refresh path Cron uses for
-    // every mapped endpoint. Verdicts land in the snapshots within seconds
-    // and the next list sync (Cron or "Sync now") publishes them.
-    const endpointIds = await getMappedEndpointIds(env.DB);
-    if (endpointIds.size === 0) return json({ refresh_queued: 0 });
-    await enqueueRefreshes(env.REFRESH_QUEUE, [...endpointIds]);
+
+    const endpointIds = [...(await getMappedEndpointIds(env.DB))];
+    if (endpointIds.length === 0) {
+      return json({ mode: "sync", refreshed_endpoints: 0, synced: false });
+    }
+
+    // Small enough to refresh inline and publish immediately. Larger fleets
+    // fall back to the queue below, since a single request cannot reliably
+    // page through thousands of Cortex calls.
+    if (endpointIds.length <= SYNC_REFRESH_ALL_LIMIT) {
+      const runtimeEnv = requireRuntimeEnv(env);
+      let endpoints: CortexEndpoint[] = [];
+      try {
+        endpoints = await getEndpointsByIds(endpointIds, runtimeEnv);
+      } catch (error) {
+        await recordCortexError(env.DB, errorMessage(error), Date.now()).catch(
+          () => {},
+        );
+        throw error;
+      }
+      if (endpoints.length > 0) {
+        const maxContentAgeDays = await currentMaxContentAgeDays(env.DB);
+        await persistEvaluatedEndpoints(endpoints, runtimeEnv, maxContentAgeDays);
+        await recordCortexSuccess(env.DB, Date.now()).catch(() => {});
+      }
+
+      const settings = await getAppSettings(env.DB);
+      const sync = await attemptListSync(env, settings);
+      console.log(
+        JSON.stringify({
+          event: "manual_cortex_refresh_all",
+          mode: "sync",
+          endpoints: endpoints.length,
+          synced: sync.attempted && !sync.error,
+        }),
+      );
+      return json({
+        mode: "sync",
+        refreshed_endpoints: endpoints.length,
+        synced: sync.attempted && !sync.error,
+        changed: sync.changed,
+        count: sync.count,
+        sync_error: sync.error,
+      });
+    }
+
+    await enqueueRefreshes(env.REFRESH_QUEUE, endpointIds);
     console.log(
       JSON.stringify({
         event: "manual_cortex_refresh_queued",
-        endpoints: endpointIds.size,
+        endpoints: endpointIds.length,
       }),
     );
-    return json({ refresh_queued: endpointIds.size });
+    return json({
+      mode: "async",
+      refresh_queued: endpointIds.length,
+      synced: false,
+    });
   }
   let deviceIds: string[];
   if (typeof body.deviceId === "string" && body.deviceId.trim()) {
@@ -1491,6 +1541,49 @@ async function postApiDevicesResync(env: Env): Promise<Response> {
   });
 }
 
+// Best-effort list sync shared by the explicit "Sync now" endpoint and any
+// action that wants to publish immediately after changing snapshot data.
+// Never throws: a misconfigured or already-running sync is reported in the
+// result rather than failing the caller's primary action.
+async function attemptListSync(
+  env: Env,
+  settings: AppSettings,
+): Promise<{
+  attempted: boolean;
+  changed: boolean;
+  count: number | null;
+  error: string | null;
+}> {
+  if (
+    !settings.listSyncEnabled ||
+    !settings.cloudflareAccountId ||
+    !settings.serialListId
+  ) {
+    return { attempted: false, changed: false, count: null, error: null };
+  }
+  try {
+    const result = await synchronizeList(env, settings);
+    if (!result) {
+      return {
+        attempted: true,
+        changed: false,
+        count: null,
+        error: "sync_already_running",
+      };
+    }
+    return {
+      attempted: true,
+      changed: result.changed,
+      count: result.count,
+      error: null,
+    };
+  } catch (error) {
+    const detail = errorMessage(error);
+    await recordListSyncError(env.DB, detail, Date.now()).catch(() => {});
+    return { attempted: true, changed: false, count: null, error: detail };
+  }
+}
+
 async function postApiSync(env: Env): Promise<Response> {
   const settings = await getAppSettings(env.DB);
   if (!settings.listSyncEnabled) {
@@ -1499,19 +1592,14 @@ async function postApiSync(env: Env): Promise<Response> {
   if (!settings.cloudflareAccountId || !settings.serialListId) {
     throw new ClientError(400, "list_not_configured");
   }
-  try {
-    const result = await synchronizeList(env, settings);
-    if (!result) throw new ClientError(409, "sync_already_running");
-    return json({ changed: result.changed, count: result.count });
-  } catch (error) {
-    if (error instanceof ClientError) throw error;
-    await recordListSyncError(
-      env.DB,
-      errorMessage(error),
-      Date.now(),
-    ).catch(() => {});
-    throw new ClientError(502, `sync_failed: ${errorMessage(error)}`);
+  const result = await attemptListSync(env, settings);
+  if (result.error === "sync_already_running") {
+    throw new ClientError(409, "sync_already_running");
   }
+  if (result.error) {
+    throw new ClientError(502, `sync_failed: ${result.error}`);
+  }
+  return json({ changed: result.changed, count: result.count });
 }
 
 // Diffs the recently seen Cortex inventory against the verified mappings in
