@@ -78,6 +78,10 @@ import type {
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_DEVICES = 1000;
+// Deleting a device the provider reported this recently requires an explicit
+// force flag. last_seen_at is touched at most once per day, so the window
+// covers the full touch cadence plus a day of margin.
+const RECENTLY_SEEN_DELETE_GUARD_MS = 48 * 60 * 60 * 1000;
 
 let schemaEnsured = false;
 
@@ -1305,6 +1309,35 @@ async function postApiDeviceDelete(
     throw new ClientError(400, "device_id_required");
   }
 
+  // Deleting a device the provider still reports removes its serial from
+  // the denylist on the next sync - an enforcement gap a mistyped row or a
+  // misused token can silently open. Devices seen within RECENTLY_SEEN_MS
+  // require an explicit force flag; offline devices delete freely, matching
+  // the stale-cleanup semantics.
+  if (body.force !== true) {
+    const mappings = await getDeviceMappingsByDeviceIds(env.DB, deviceIds);
+    const mappedIds = new Set(
+      mappings.map((mapping) => mapping.cloudflareDeviceId),
+    );
+    const now = Date.now();
+    const recentlySeen = mappings
+      .filter(
+        (mapping) =>
+          (mapping.lastSeenAt ?? 0) > now - RECENTLY_SEEN_DELETE_GUARD_MS,
+      )
+      .map((mapping) => mapping.cloudflareDeviceId);
+    if (recentlySeen.length > 0) {
+      console.warn(
+        JSON.stringify({
+          event: "device_delete_rejected",
+          device_ids: recentlySeen,
+          known: mappedIds.size,
+        }),
+      );
+      throw new ClientError(409, "recently_seen_delete_requires_force");
+    }
+  }
+
   const deleted = await deleteDevices(env.DB, deviceIds, Date.now());
   const deletedSet = new Set(deleted);
   const notFound = deviceIds.filter((id) => !deletedSet.has(id));
@@ -1498,7 +1531,8 @@ async function postApiBindings(request: Request, env: Env): Promise<Response> {
 
 // Release a device from tracking entirely: the mapping is removed, the serial
 // is tombstoned for the next list sync, and the next poll starts a fresh
-// discovery. Used to undo a wrong pin or drop a cloned enrollment.
+// discovery. Used to undo a wrong pin or drop a cloned enrollment. Devices
+// still reporting to the provider require force, exactly like device deletion.
 async function deleteApiBindings(request: Request, env: Env): Promise<Response> {
   const body = await readRequestJson(request, 16 * 1024);
   if (!isRecord(body)) throw new ClientError(400, "bindings_object_required");
@@ -1506,6 +1540,20 @@ async function deleteApiBindings(request: Request, env: Env): Promise<Response> 
 
   const mappings = await getDeviceMappingsByDeviceIds(env.DB, [deviceId]);
   if (mappings.length === 0) throw new ClientError(404, "device_not_found");
+  const lastSeen = mappings[0]?.lastSeenAt ?? 0;
+  if (
+    body.force !== true &&
+    lastSeen > Date.now() - RECENTLY_SEEN_DELETE_GUARD_MS
+  ) {
+    console.warn(
+      JSON.stringify({
+        event: "device_delete_rejected",
+        device_ids: [deviceId],
+        known: 1,
+      }),
+    );
+    throw new ClientError(409, "recently_seen_delete_requires_force");
+  }
   await deleteDevices(env.DB, [deviceId], Date.now());
   return json({ released: true, device_id: deviceId });
 }

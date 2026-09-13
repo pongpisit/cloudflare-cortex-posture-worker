@@ -39,7 +39,12 @@ address.
 Deleting a device removes its mapping and observations, tombstones its serial
 so the next synchronization removes it from the denylist, and deletes the
 endpoint snapshot when no other mapping references it. Devices that are still
-enrolled and reported by the provider are re-discovered on a later poll.
+enrolled and reported by the provider are re-discovered on a later poll. As a
+safety guard, deleting a device the provider reported in the last 48 hours
+fails with 409 from the dashboard buttons — the row is likely active, and
+deleting it would open a brief enforcement gap. Override with
+`POST /api/devices/delete` + `"force": true` when you really mean it (for
+example removing a cloned enrollment that is actively polling).
 
 The **Debug log** button opens a chat-style popup that streams the most recent
 Cortex requests and responses live — requests appear as outgoing bubbles,
@@ -59,12 +64,12 @@ dashboard page itself stay open.
 | `GET /api/overview` | Integration statuses, device counts, noncompliant serial count, sync state |
 | `GET /api/devices?status=all&limit=N` | Per-device compliance rows; `status=all\|noncompliant\|compliant`, `search=<text>`, `limit` 1–500, default 200 |
 | `POST /api/devices/refresh` | Refresh devices from Cortex immediately: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100; or `{"all": true}` to queue the Cron-style refresh for **every mapped endpoint** (returns `refresh_queued`; verdicts publish on the next list sync) |
-| `POST /api/devices/delete` | Delete devices from tracking: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100 |
+| `POST /api/devices/delete` | Delete devices from tracking: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100. Devices the provider reported in the last 48 hours are refused with 409 — add `"force": true` to override, since deletion removes their serial from the denylist on the next sync |
 | `POST /api/sync` | Run the list synchronization immediately |
 | `POST /api/coverage?windowDays=30` | Diff the recently seen Cortex inventory against D1 mappings; returns `scanned`, `covered`, `uncovered`, `coverage_percent`, `truncated`, and an `uncovered_sample` of up to 100 endpoints |
 | `GET /api/bindings` | The operator queue: unbound devices (clone contention, ambiguity, MAC-strict refusals) with candidate Cortex endpoints, drifted bindings, and the serial-integrity report (duplicate, junk, and missing serials) |
 | `POST /api/bindings` | Pin an unbound device to a specific Cortex endpoint permanently: `{"device_id": "...", "endpoint_id": "..."}`. Refuses endpoints actively claimed by a different device (409) |
-| `DELETE /api/bindings` | Release a device entirely (undo a wrong pin, drop a cloned enrollment): `{"device_id": "..."}` — removes the mapping and tombstones the serial for the next sync |
+| `DELETE /api/bindings` | Release a device entirely (undo a wrong pin, drop a cloned enrollment): `{"device_id": "..."}` — removes the mapping and tombstones the serial for the next sync. Devices reported in the last 48 hours require `"force": true` (409 otherwise) |
 | `GET /api/debug-log?limit=N` | Recent Cortex request/response pairs, `limit` 1–200, default 50 |
 | `DELETE /api/debug-log` | Clear the debug log |
 | `GET /api/settings` | Current operational settings and readiness flags |

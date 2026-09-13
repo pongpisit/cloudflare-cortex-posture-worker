@@ -28,6 +28,7 @@ structured events include:
 - `serial_denylist_sync_error`
 - `serial_denylist_capacity_warning`
 - `device_mapping_failed`
+- `device_delete_rejected`
 - `scheduled_refresh`
 - `manual_cortex_refresh_queued`
 - `cortex_refresh_error`

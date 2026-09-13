@@ -829,6 +829,9 @@ const DASHBOARD_HTML = `<!doctype html>
       body: JSON.stringify({ deviceId: deviceId })
     })
       .then(function (r) {
+        if (r.status === 409) {
+          throw new Error("device still reports to the provider \\u00b7 force-delete via API to override");
+        }
         if (!r.ok) throw new Error("delete failed (" + r.status + ")");
         return r.json();
       })
@@ -863,6 +866,9 @@ const DASHBOARD_HTML = `<!doctype html>
       body: JSON.stringify({ deviceIds: selectedIds })
     })
       .then(function (r) {
+        if (r.status === 409) {
+          throw new Error("selection contains devices still reporting to the provider \\u00b7 force-delete via API to override");
+        }
         if (!r.ok) throw new Error("delete failed (" + r.status + ")");
         return r.json();
       })

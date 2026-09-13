@@ -1400,22 +1400,33 @@ interface DeviceMappingRow {
 export async function getDeviceMappingsByDeviceIds(
   db: D1Database,
   deviceIds: string[],
-): Promise<Array<{ cloudflareDeviceId: string; cortexEndpointId: string }>> {
-  const result: Array<{ cloudflareDeviceId: string; cortexEndpointId: string }> =
-    [];
+): Promise<
+  Array<{
+    cloudflareDeviceId: string;
+    cortexEndpointId: string;
+    lastSeenAt: number | null;
+  }>
+> {
+  const result: Array<{
+    cloudflareDeviceId: string;
+    cortexEndpointId: string;
+    lastSeenAt: number | null;
+  }> = [];
   for (const ids of chunk(deviceIds, 80)) {
     const placeholders = ids.map(() => "?").join(",");
     const rows = await db
       .prepare(
-        `SELECT cloudflare_device_id, cortex_endpoint_id FROM device_mappings
+        `SELECT cloudflare_device_id, cortex_endpoint_id, last_seen_at
+         FROM device_mappings
          WHERE cloudflare_device_id IN (${placeholders})`,
       )
       .bind(...ids)
-      .all<DeviceMappingRow>();
+      .all<DeviceMappingRow & { last_seen_at: number | null }>();
     result.push(
       ...rows.results.map((row) => ({
         cloudflareDeviceId: row.cloudflare_device_id,
         cortexEndpointId: row.cortex_endpoint_id,
+        lastSeenAt: row.last_seen_at,
       })),
     );
   }
