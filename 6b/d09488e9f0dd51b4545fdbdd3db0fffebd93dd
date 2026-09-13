@@ -1,0 +1,19 @@
+test/dashboard.test.ts
+  s_55e1360a41c663::t_4b17026b1c5238 28-37,44-47,58-61,98,111,121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6bd09488e9f0dd51b4545fdbdd3db0fffebd93dd",
+  "prompts": {},
+  "sessions": {
+    "s_55e1360a41c663": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_fc4336d99ffeR5T1fO9EeHuzZq",
+        "model": "gpt-5.6"
+      },
+      "human_author": "pongpisit <pongpisit@cloudflare.com>"
+    }
+  }
+}
