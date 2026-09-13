@@ -1,0 +1,19 @@
+test/dashboard.test.ts
+  s_55e1360a41c663::t_603fa3408de671 99,113,124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "6969f9af2babc598c1b370a84d4b6c2b7ee756c0",
+  "prompts": {},
+  "sessions": {
+    "s_55e1360a41c663": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_fc4336d99ffeR5T1fO9EeHuzZq",
+        "model": "gpt-5.6"
+      },
+      "human_author": "pongpisit <pongpisit@cloudflare.com>"
+    }
+  }
+}
