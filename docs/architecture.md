@@ -211,8 +211,9 @@ flowchart TD
   1 minute for strict environments).
 - Content age is measured at the successful Cortex refresh time, so
   wall-clock aging during an outage cannot create a new denial.
-- Only `last_content_update_time` matters. Cortex `operational_status` and
-  `last_seen` are stored for visibility but never affect the decision.
+- Only `last_content_update_time` matters. Cortex `operational_status`,
+  `endpoint_status`, `content_status`, and `last_seen` are stored for
+  visibility but never affect the decision.
 - Denylisted endpoints are re-checked every 30 minutes (recovery tier) so
   recovered devices are unblocked promptly; everything else is swept every
   4 hours (detection tier).
@@ -277,7 +278,7 @@ All state lives in D1:
 | Table | Purpose |
 | --- | --- |
 | `device_mappings` | One row per Cloudflare device: `cortex_endpoint_id`, hostname, verified MAC, serial, status, `last_seen_at` |
-| `endpoint_snapshots` | One row per Cortex endpoint: `last_content_update_time`, score, reason, `cortex_refreshed_at` |
+| `endpoint_snapshots` | One row per Cortex endpoint: `last_content_update_time`, score, reason, `cortex_refreshed_at`, plus the raw `endpoint_status` (connectivity) and `content_status` (Cortex's own freshness opinion) fields, stored for operator visibility only - never read by `evaluateEndpoint` |
 | `serial_removals` | Durable tombstones that remove invalidated or changed serials from the denylist |
 | `device_observations` | Concurrency guard: mapping writes only apply to observations from the same poll |
 | `refresh_leases`, `sync_leases` | Prevent duplicate Cortex refreshes and list replacements across overlapping runs |

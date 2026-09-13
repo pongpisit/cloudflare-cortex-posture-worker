@@ -525,12 +525,15 @@ export async function saveEndpointSnapshots(
       .prepare(
         `INSERT INTO endpoint_snapshots(
            cortex_endpoint_id, endpoint_name, operational_status,
+           endpoint_status, content_status,
            last_content_update_time, last_seen, score, reason,
            cortex_refreshed_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(cortex_endpoint_id) DO UPDATE SET
            endpoint_name = excluded.endpoint_name,
            operational_status = excluded.operational_status,
+           endpoint_status = excluded.endpoint_status,
+           content_status = excluded.content_status,
            last_content_update_time = excluded.last_content_update_time,
            last_seen = excluded.last_seen,
            score = excluded.score,
@@ -543,6 +546,8 @@ export async function saveEndpointSnapshots(
         endpoint.endpoint_id,
         String(endpoint.endpoint_name ?? endpoint.host_name ?? ""),
         String(endpoint.operational_status ?? ""),
+        endpoint.endpoint_status ? String(endpoint.endpoint_status) : null,
+        endpoint.content_status ? String(endpoint.content_status) : null,
         normalizeTimestamp(endpoint.last_content_update_time),
         normalizeTimestamp(endpoint.last_seen),
         evaluation.score,
@@ -1447,6 +1452,9 @@ interface DeviceComplianceRow {
   reason: string | null;
   last_content_update_time: number | null;
   cortex_refreshed_at: number | null;
+  endpoint_status: string | null;
+  content_status: string | null;
+  operational_status: string | null;
 }
 
 export interface DeviceCompliance {
@@ -1460,6 +1468,13 @@ export interface DeviceCompliance {
   lastContentUpdateTime: number | null;
   cortexRefreshedAt: number | null;
   noncompliant: boolean;
+  // Raw Cortex-reported fields, surfaced for operator visibility only - the
+  // noncompliant verdict above is always computed from
+  // last_content_update_time against the configured threshold, never from
+  // Cortex's own opinion of itself.
+  endpointStatus: string | null;
+  contentStatus: string | null;
+  operationalStatus: string | null;
 }
 
 const NONCOMPLIANT_EXPRESSION = `m.status = 'verified'
@@ -1494,7 +1509,10 @@ export async function listDeviceCompliance(
               s.score,
               s.reason,
               s.last_content_update_time,
-              s.cortex_refreshed_at
+              s.cortex_refreshed_at,
+              s.endpoint_status,
+              s.content_status,
+              s.operational_status
        FROM device_mappings m
        LEFT JOIN endpoint_snapshots s
          ON s.cortex_endpoint_id = m.cortex_endpoint_id
@@ -1522,6 +1540,9 @@ export async function listDeviceCompliance(
     lastContentUpdateTime: row.last_content_update_time,
     cortexRefreshedAt: row.cortex_refreshed_at,
     noncompliant: isRowNoncompliant(row, maximumContentAge),
+    endpointStatus: row.endpoint_status,
+    contentStatus: row.content_status,
+    operationalStatus: row.operational_status,
   }));
 }
 
@@ -1757,7 +1778,10 @@ export async function getDeviceComplianceByDeviceId(
               s.score,
               s.reason,
               s.last_content_update_time,
-              s.cortex_refreshed_at
+              s.cortex_refreshed_at,
+              s.endpoint_status,
+              s.content_status,
+              s.operational_status
        FROM device_mappings m
        LEFT JOIN endpoint_snapshots s
          ON s.cortex_endpoint_id = m.cortex_endpoint_id
@@ -1779,6 +1803,9 @@ export async function getDeviceComplianceByDeviceId(
     lastContentUpdateTime: row.last_content_update_time,
     cortexRefreshedAt: row.cortex_refreshed_at,
     noncompliant: isRowNoncompliant(row, maximumContentAge),
+    endpointStatus: row.endpoint_status,
+    contentStatus: row.content_status,
+    operationalStatus: row.operational_status,
   };
 }
 

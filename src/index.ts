@@ -2018,6 +2018,8 @@ async function postApiCoverage(url: URL, env: Env): Promise<Response> {
         endpoint_id: endpoint.endpoint_id,
         hostname: endpoint.endpoint_name ?? endpoint.host_name ?? null,
         operational_status: endpoint.operational_status ?? null,
+        endpoint_status: endpoint.endpoint_status ?? null,
+        content_status: endpoint.content_status ?? null,
         last_seen: endpoint.last_seen ?? null,
         reason,
         fix,
@@ -2081,6 +2083,8 @@ async function getApiBindings(env: Env): Promise<Response> {
                 mac_address: endpoint.mac_address ?? null,
                 last_seen: endpoint.last_seen ?? null,
                 operational_status: endpoint.operational_status ?? null,
+                endpoint_status: endpoint.endpoint_status ?? null,
+                content_status: endpoint.content_status ?? null,
                 claimed_by:
                   claim && claim.cloudflareDeviceId !== device.cloudflareDeviceId
                     ? claim.cloudflareDeviceId

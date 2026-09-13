@@ -13,6 +13,7 @@ const MIGRATION_NAMES = [
   "0012_mapping_identity",
   "0013_bind_method",
   "0014_unbound_devices",
+  "0015_endpoint_status",
 ] as const;
 
 // Idempotent equivalent of migrations 0001-0008, executed as one D1 batch
@@ -48,6 +49,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
       cortex_endpoint_id TEXT PRIMARY KEY,
       endpoint_name TEXT NOT NULL,
       operational_status TEXT NOT NULL,
+      endpoint_status TEXT,
+      content_status TEXT,
       last_content_update_time INTEGER NOT NULL,
       last_seen INTEGER NOT NULL,
       score INTEGER NOT NULL CHECK(score BETWEEN 0 AND 100),
@@ -197,6 +200,22 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   try {
     await db
       .prepare(`ALTER TABLE device_mappings ADD COLUMN bind_method TEXT`)
+      .run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/duplicate column/i.test(message)) throw error;
+  }
+  try {
+    await db
+      .prepare(`ALTER TABLE endpoint_snapshots ADD COLUMN endpoint_status TEXT`)
+      .run();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/duplicate column/i.test(message)) throw error;
+  }
+  try {
+    await db
+      .prepare(`ALTER TABLE endpoint_snapshots ADD COLUMN content_status TEXT`)
       .run();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

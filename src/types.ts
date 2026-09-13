@@ -13,6 +13,7 @@ export interface CortexEndpoint {
   host_name?: string;
   endpoint_status?: string;
   operational_status?: string;
+  content_status?: string;
   last_content_update_time?: number | string;
   last_seen?: number | string;
   mac_address?: string | string[];

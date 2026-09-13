@@ -2,8 +2,13 @@
 
 `GET /dashboard` serves an operations page. It shows integration health,
 device counts, the current noncompliant serial count, and a filterable device
-table (hostname, serial, MAC, score, reason, content age, refresh recency).
-The page refreshes every 60 seconds.
+table (hostname, serial, MAC, score, reason, content age, refresh recency,
+and two raw Cortex fields — **Online** (`endpoint_status`: connectivity, not
+enforcement) and **Content** (`content_status`: Cortex's own freshness
+opinion). Both are shown for operator context only; the noncompliant chip is
+always computed from `last_content_update_time` against the configured
+threshold, never from Cortex's self-report. The page refreshes every 60
+seconds.
 
 The configuration panel manages all operational settings, stored in D1 and
 applied on the next Cron run without a redeploy:
@@ -80,13 +85,13 @@ dashboard page itself stay open.
 | Endpoint | Description |
 | --- | --- |
 | `GET /api/overview` | Integration statuses, device counts, noncompliant serial count, sync state |
-| `GET /api/devices?status=all&limit=N` | Per-device compliance rows; `status=all\|noncompliant\|compliant`, `search=<text>`, `limit` 1–500, default 200 |
+| `GET /api/devices?status=all&limit=N` | Per-device compliance rows; `status=all\|noncompliant\|compliant`, `search=<text>`, `limit` 1–500, default 200. Each row includes the raw Cortex `endpointStatus` (connectivity) and `contentStatus` (Cortex's own freshness opinion) alongside the computed `noncompliant` verdict |
 | `POST /api/sync` | **The one sync action** (what the dashboard's "Sync now" button calls): pulls the Cloudflare device inventory to rebuild any missing bindings, refreshes Cortex content for every mapped endpoint, then publishes the denylist. Each step is best-effort — a Cloudflare or Cortex error is reported under `resync.error` / `refresh.error` rather than blocking the rest. Returns `resync`, `refresh`, `changed`, `count` |
 | `POST /api/devices/refresh` | Advanced primitive behind "Sync now": refresh specific devices from Cortex, `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100; or `{"all": true}` for every mapped endpoint without a Cloudflare resync first |
 | `POST /api/devices/resync` | Advanced primitive behind "Sync now": pull the Cloudflare device inventory and queue discovery for every unmapped, non-excluded, non-revoked device, without also refreshing Cortex content or publishing |
 | `POST /api/devices/delete` | Delete devices from tracking: `{"deviceId": "..."}` or `{"deviceIds": [...]}` up to 100. Devices the provider reported in the last 48 hours are refused with 409 — add `"force": true` to override, since deletion removes their serial from the denylist on the next sync |
-| `POST /api/coverage?windowDays=30` | Diff the recently seen Cortex inventory against D1 mappings; returns `scanned`, `covered`, `uncovered`, `coverage_percent`, `truncated`, and an `uncovered_sample` of up to 100 endpoints, each with a MAC-corroborated `reason` (`duplicate_of_mapped_device`, `queued_for_operator_review`, `ambiguous_hostname_shared_by_multiple_devices`, or `no_cloudflare_device`) and a `fix` describing what to do |
-| `GET /api/bindings` | The operator queue: unbound devices (clone contention, ambiguity, MAC-strict refusals) with candidate Cortex endpoints, drifted bindings, and the serial-integrity report (duplicate, junk, and missing serials) |
+| `POST /api/coverage?windowDays=30` | Diff the recently seen Cortex inventory against D1 mappings; returns `scanned`, `covered`, `uncovered`, `coverage_percent`, `truncated`, and an `uncovered_sample` of up to 100 endpoints, each with `operational_status`, `endpoint_status` (connectivity), `content_status`, a MAC-corroborated `reason` (`duplicate_of_mapped_device`, `queued_for_operator_review`, `ambiguous_hostname_shared_by_multiple_devices`, or `no_cloudflare_device`), and a `fix` describing what to do |
+| `GET /api/bindings` | The operator queue: unbound devices (clone contention, ambiguity, MAC-strict refusals) with candidate Cortex endpoints — each candidate includes `operational_status`, `endpoint_status` (connectivity), and `content_status` — drifted bindings, and the serial-integrity report (duplicate, junk, and missing serials) |
 | `POST /api/bindings` | Pin an unbound device to a specific Cortex endpoint permanently: `{"device_id": "...", "endpoint_id": "..."}`. Refuses endpoints actively claimed by a different device (409) |
 | `DELETE /api/bindings` | Release a device entirely (undo a wrong pin, drop a cloned enrollment): `{"device_id": "..."}` — removes the mapping and tombstones the serial for the next sync. Devices reported in the last 48 hours require `"force": true` (409 otherwise) |
 | `GET /api/debug-log?limit=N` | Recent Cortex request/response pairs, `limit` 1–200, default 50 |

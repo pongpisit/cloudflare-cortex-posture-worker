@@ -229,6 +229,7 @@ const DASHBOARD_HTML = `<!doctype html>
         <tr>
           <th><input type="checkbox" id="select-all" aria-label="Select all"></th>
           <th></th><th>Hostname</th><th>Serial</th><th>MAC</th><th>Compliance</th>
+          <th>Online</th><th>Content</th>
           <th>Mapping</th><th>Score</th><th>Reason</th>
           <th>Content updated</th><th>Refreshed</th>
         </tr>
@@ -279,6 +280,24 @@ const DASHBOARD_HTML = `<!doctype html>
     if (row.mappingStatus === "invalid") return ["neutral", "invalid"];
     if (row.mappingStatus === "verified") return ["ok", "compliant"];
     return ["neutral", row.mappingStatus || "unknown"];
+  }
+
+  // Raw Cortex-reported fields, shown for operator context only - they never
+  // drive the compliance chip above, which is always computed from
+  // last_content_update_time against the configured threshold.
+  function onlineChip(status) {
+    var s = (status || "").toUpperCase();
+    if (s === "CONNECTED") return ["ok", "online"];
+    if (s === "DISCONNECTED") return ["neutral", "offline"];
+    if (!s) return ["neutral", "\\u2014"];
+    return ["neutral", s.toLowerCase().replace(/_/g, " ")];
+  }
+
+  function contentChip(status) {
+    var s = (status || "").toUpperCase();
+    if (s === "UP_TO_DATE") return ["ok", "up to date"];
+    if (!s) return ["neutral", "\\u2014"];
+    return ["neutral", s.toLowerCase().replace(/_/g, " ")];
   }
 
   function el(tag, cls, text) {
@@ -373,6 +392,10 @@ const DASHBOARD_HTML = `<!doctype html>
     td("mono", mac(row.verifiedMac));
     var c = chip(row);
     td(null).appendChild(el("span", "chip " + c[0], c[1]));
+    var online = onlineChip(row.endpointStatus);
+    td(null).appendChild(el("span", "chip " + online[0], online[1]));
+    var content = contentChip(row.contentStatus);
+    td(null).appendChild(el("span", "chip " + content[0], content[1]));
     td(null, row.mappingStatus);
     td(null, row.score === null || row.score === undefined ? "\\u2014" : String(row.score));
     td(null, row.reason || "\\u2014");
