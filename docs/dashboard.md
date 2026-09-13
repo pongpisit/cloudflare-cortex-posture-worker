@@ -45,6 +45,11 @@ responses as incoming ones, with method, URL, status, duration, headers
 
 ## JSON endpoints
 
+Mutating endpoints (`POST`/`PUT`/`DELETE` rows below) require the
+`x-management-token: <secret>` header while the `MANAGEMENT_TOKEN` Worker
+secret is set; without it they return `401`. Read-only `GET` endpoints and the
+dashboard page itself stay open.
+
 | Endpoint | Description |
 | --- | --- |
 | `GET /api/overview` | Integration statuses, device counts, noncompliant serial count, sync state |
@@ -64,6 +69,7 @@ Settings can also be updated directly:
 ```bash
 curl -X PUT "https://cortex-posture.example.com/api/settings" \
   -H "content-type: application/json" \
+  -H "x-management-token: <MANAGEMENT_TOKEN secret>" \
   -d '{"serialListId": "<list-id>", "listSyncEnabled": true}'
 ```
 

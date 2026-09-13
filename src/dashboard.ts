@@ -449,6 +449,33 @@ const DASHBOARD_HTML = `<!doctype html>
     }
   }
 
+  // Mutating requests carry the management token from sessionStorage when one
+  // is stored; on a 401 the user is prompted once per session and the call
+  // retried. Deployments without a configured token never prompt.
+  function mutatingFetch(url, init, retried) {
+    init = init || {};
+    var headers = new Headers(init.headers || {});
+    try {
+      var stored = sessionStorage.getItem("cortex_mgmt_token");
+      if (stored) headers.set("x-management-token", stored);
+    } catch (e) {}
+    return fetch(url, {
+      method: init.method,
+      headers: headers,
+      body: init.body
+    }).then(function (r) {
+      if (r.status !== 401 || retried) return r;
+      var token = prompt(
+        "This action needs the management token.\\nPaste the MANAGEMENT_TOKEN Worker secret:"
+      );
+      try {
+        sessionStorage.removeItem("cortex_mgmt_token");
+        if (token) sessionStorage.setItem("cortex_mgmt_token", token);
+      } catch (e) {}
+      return token ? mutatingFetch(url, init, true) : r;
+    });
+  }
+
   function loadLists() {
     configMessage("Loading accounts and lists\\u2026");
     fetch("/api/cloudflare/lists", { headers: { accept: "application/json" } })
@@ -511,7 +538,7 @@ const DASHBOARD_HTML = `<!doctype html>
       if (name) body.serialListName = name;
     }
     configMessage("Saving\\u2026");
-    fetch("/api/settings", {
+    mutatingFetch("/api/settings", {
       method: "PUT",
       headers: {
         accept: "application/json",
@@ -535,7 +562,7 @@ const DASHBOARD_HTML = `<!doctype html>
 
   function syncNow() {
     configMessage("Syncing\\u2026");
-    fetch("/api/sync", { method: "POST", headers: { accept: "application/json" } })
+    mutatingFetch("/api/sync", { method: "POST", headers: { accept: "application/json" } })
       .then(function (r) {
         if (!r.ok) throw new Error("sync failed (" + r.status + ")");
         return r.json();
@@ -553,7 +580,7 @@ const DASHBOARD_HTML = `<!doctype html>
 
   function coverageAudit() {
     configMessage("Scanning Cortex inventory\\u2026 this can take a while on large fleets");
-    fetch("/api/coverage?windowDays=30", { method: "POST", headers: { accept: "application/json" } })
+    mutatingFetch("/api/coverage?windowDays=30", { method: "POST", headers: { accept: "application/json" } })
       .then(function (r) {
         if (!r.ok) throw new Error("coverage audit failed (" + r.status + ")");
         return r.json();
@@ -705,7 +732,7 @@ const DASHBOARD_HTML = `<!doctype html>
   });
   document.getElementById("debug-close").addEventListener("click", closeDebug);
   document.getElementById("debug-clear").addEventListener("click", function () {
-    fetch("/api/debug-log", { method: "DELETE" })
+    mutatingFetch("/api/debug-log", { method: "DELETE" })
       .then(function () {
         lastMaxDebugId = null;
         loadDebug();
@@ -762,7 +789,7 @@ const DASHBOARD_HTML = `<!doctype html>
   }
 
   function deleteDevice(deviceId, done) {
-    fetch("/api/devices/delete", {
+    mutatingFetch("/api/devices/delete", {
       method: "POST",
       headers: {
         accept: "application/json",
@@ -796,7 +823,7 @@ const DASHBOARD_HTML = `<!doctype html>
     var button = document.getElementById("delete-selected");
     button.disabled = true;
     button.textContent = "Deleting\\u2026";
-    fetch("/api/devices/delete", {
+    mutatingFetch("/api/devices/delete", {
       method: "POST",
       headers: {
         accept: "application/json",
@@ -838,7 +865,7 @@ const DASHBOARD_HTML = `<!doctype html>
     var button = document.getElementById("check-selected");
     button.disabled = true;
     button.textContent = "Checking\\u2026";
-    fetch("/api/devices/refresh", {
+    mutatingFetch("/api/devices/refresh", {
       method: "POST",
       headers: {
         accept: "application/json",
@@ -941,7 +968,7 @@ const DASHBOARD_HTML = `<!doctype html>
     if (!button.classList.contains("row-check")) return;
     button.disabled = true;
     button.textContent = "\\u2026";
-    fetch("/api/devices/refresh", {
+    mutatingFetch("/api/devices/refresh", {
       method: "POST",
       headers: {
         accept: "application/json",

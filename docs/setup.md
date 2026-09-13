@@ -6,7 +6,7 @@ How to deploy and connect the Worker end to end:
 2. [Cortex configuration](#cortex-configuration)
 3. [Serial list setup](#serial-list-setup)
 4. [Custom provider setup](#custom-provider-setup)
-5. [Securing the endpoint (optional)](#securing-the-endpoint-optional)
+5. [Securing the endpoint](#securing-the-endpoint)
 6. [Policy setup](#policy-setup)
 7. [Validation](#validation)
 8. [Smoke testing](#smoke-testing)
@@ -34,8 +34,11 @@ The deploy flow prompts for the Cortex base URL and the API credentials.
 The deployment is intentionally inert until the remaining setup is completed:
 
 1. Set `CORTEX_BASE_URL` and the secrets (`CORTEX_API_KEY`,
-   `CORTEX_API_KEY_ID`, `CLOUDFLARE_API_TOKEN`) if the deploy flow did not
-   already collect them.
+   `CORTEX_API_KEY_ID`, `CLOUDFLARE_API_TOKEN`, `MANAGEMENT_TOKEN`) if the
+   deploy flow did not already collect them. `MANAGEMENT_TOKEN` is a shared
+   secret required on every mutating dashboard/API call — generate one with
+   `openssl rand -hex 32`. While it is unset the mutating routes stay open,
+   so never leave it unset on a production deployment.
 2. Open the dashboard, select the Zero Trust list, and enable synchronization
    (see the [dashboard guide](dashboard.md)). All remaining configuration is
    managed there, stored in D1, and applied on the next Cron run without a
@@ -64,6 +67,7 @@ npx wrangler secret put CORTEX_BASE_URL
 npx wrangler secret put CORTEX_API_KEY
 npx wrangler secret put CORTEX_API_KEY_ID
 npx wrangler secret put CLOUDFLARE_API_TOKEN
+npx wrangler secret put MANAGEMENT_TOKEN
 npm run migrate:remote
 npm run deploy
 ```
@@ -177,12 +181,30 @@ in which case they must be a real service token's credentials.
 Cloudflare only polls `/check` while there are enrolled, online devices to
 evaluate, so polls pause overnight when the fleet is powered off.
 
-## Securing the endpoint (optional)
+## Securing the endpoint
 
-By default every endpoint — including `/check` and the dashboard — accepts
-unauthenticated requests. That is safe on a locked-down network and simplest
-to operate, but if the Worker URL is reachable by untrusted parties you should
-put Cloudflare Access in front of it:
+### Management token (recommended, built in)
+
+Set the `MANAGEMENT_TOKEN` Worker secret to require an
+`x-management-token: <secret>` header on every **mutating** API call —
+`POST /api/devices/refresh`, `POST /api/devices/delete`, `POST /api/sync`,
+`POST /api/coverage`, `PUT /api/settings`, and `DELETE /api/debug-log`:
+
+```bash
+npx wrangler secret put MANAGEMENT_TOKEN   # paste: openssl rand -hex 32
+```
+
+The token is compared in constant time. GET routes — the dashboard page,
+`/api/overview`, `/api/devices`, `GET /api/settings` — stay readable without
+it, and `/check` is unaffected because the Cloudflare provider calls it with
+its own credentials. In the dashboard, the first mutating action prompts for
+the token once per browser session. Without the secret set, mutating routes
+remain open — acceptable only for isolated test deployments.
+
+### Putting the whole Worker behind Cloudflare Access (optional)
+
+If the Worker URL is reachable by untrusted parties you can additionally put
+Cloudflare Access in front of it:
 
 1. Create an Access **service token** and a **self-hosted application** for the
    Worker's hostname.

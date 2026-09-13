@@ -31,6 +31,9 @@
       },
       "CLOUDFLARE_API_TOKEN": {
         "description": "Cloudflare API token scoped to the account with **Zero Trust Write**. Also powers the dashboard's list selector."
+      },
+      "MANAGEMENT_TOKEN": {
+        "description": "Shared secret required on mutating dashboard/API routes (header `x-management-token`). Generate one with `openssl rand -hex 32`. Leave empty only for isolated test deployments."
       }
     }
   },

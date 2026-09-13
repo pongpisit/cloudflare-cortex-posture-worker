@@ -101,6 +101,9 @@ Worker secrets (set via `npx wrangler secret put` or the deploy flow):
 - `CORTEX_API_KEY_ID` — API key ID from the Cortex API Keys page
 - `CLOUDFLARE_API_TOKEN` — account-scoped Zero Trust Write; also powers the
   dashboard list selector
+- `MANAGEMENT_TOKEN` — shared secret required on mutating API calls via the
+  `x-management-token` header (constant-time compared). While unset, mutating
+  routes stay open
 
 Dashboard-managed settings (stored in D1, with defaults):
 

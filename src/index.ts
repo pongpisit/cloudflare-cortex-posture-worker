@@ -91,6 +91,19 @@ export default {
         }
       }
 
+      // Mutating /api routes require the MANAGEMENT_TOKEN secret while it is
+      // configured. /check is excluded: the Cloudflare provider calls it with
+      // its own service credentials, and GET routes stay open so the
+      // dashboard remains readable without a token.
+      if (
+        request.method !== "GET" &&
+        request.method !== "HEAD" &&
+        url.pathname.startsWith("/api/")
+      ) {
+        const gate = await requireManagementToken(request, env);
+        if (gate) return gate;
+      }
+
       if (url.pathname === "/health") {
         if (request.method !== "GET") return methodNotAllowed("GET");
         return await getHealth(env.DB);
@@ -1241,6 +1254,43 @@ function cortexConfigured(env: Env): boolean {
   const baseUrl = (env as Env & { CORTEX_BASE_URL?: string })
     .CORTEX_BASE_URL;
   return !!baseUrl && !baseUrl.includes("replace-");
+}
+
+const MANAGEMENT_TOKEN_HEADER = "x-management-token";
+
+// Returns a 401 response when the request may not mutate, or null to let it
+// through. When MANAGEMENT_TOKEN is unset the routes stay open, so a
+// deployment remains usable without one.
+async function requireManagementToken(
+  request: Request,
+  env: Env,
+): Promise<Response | null> {
+  const expected = (
+    env as Env & { MANAGEMENT_TOKEN?: string }
+  ).MANAGEMENT_TOKEN?.trim();
+  if (!expected) return null;
+  const provided = request.headers.get(MANAGEMENT_TOKEN_HEADER);
+  if (!provided) return json({ error: "management_token_required" }, 401);
+  const encoder = new TextEncoder();
+  const [providedHash, expectedHash] = await Promise.all([
+    crypto.subtle.digest("SHA-256", encoder.encode(provided)),
+    crypto.subtle.digest("SHA-256", encoder.encode(expected)),
+  ]);
+  if (!constantTimeEqual(providedHash, expectedHash)) {
+    return json({ error: "management_token_invalid" }, 401);
+  }
+  return null;
+}
+
+function constantTimeEqual(a: ArrayBuffer, b: ArrayBuffer): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  const left = new Uint8Array(a);
+  const right = new Uint8Array(b);
+  let diff = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    diff |= left[index]! ^ right[index]!;
+  }
+  return diff === 0;
 }
 
 function parseSettingsUpdate(body: unknown): Record<string, string> {

@@ -3,6 +3,8 @@
 #
 # Usage:
 #   BASE_URL="https://cortex-posture.example.com" npm run smoke
+# Optional:
+#   ADMIN_TOKEN="the MANAGEMENT_TOKEN secret"  # required when the token gate is enabled
 set -euo pipefail
 
 : "${BASE_URL:?Set BASE_URL to the Worker URL, e.g. https://cortex-posture.example.com}"
@@ -10,6 +12,28 @@ set -euo pipefail
 failures=0
 
 status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+
+# Mutating requests: send the management token when provided.
+mutating() {
+  if [ -n "${ADMIN_TOKEN:-}" ]; then
+    status -H "x-management-token: ${ADMIN_TOKEN}" "$@"
+  else
+    status "$@"
+  fi
+}
+
+# Expect a mutating check to be gated (401) or handled (expected status).
+expect_gated_or() {
+  local label="$1" expected="$2" actual="$3"
+  if [ "$expected" = "$actual" ]; then
+    printf 'PASS  %s (%s)\n' "$label" "$actual"
+  elif [ -z "${ADMIN_TOKEN:-}" ] && [ "$actual" = "401" ]; then
+    printf 'PASS  %s (401, management token required and not provided)\n' "$label"
+  else
+    printf 'FAIL  %s (expected %s, got %s)\n' "$label" "$expected" "$actual"
+    failures=$((failures + 1))
+  fi
+}
 
 expect() {
   local label="$1" expected="$2" actual="$3"
@@ -34,10 +58,10 @@ expect "api devices (noncompliant)" 200 \
 expect "api devices (search)" 200 \
   "$(status "${BASE_URL}/api/devices?search=desktop&limit=10")"
 expect "api debug log" 200 "$(status "${BASE_URL}/api/debug-log")"
-expect "refresh unknown device rejected" 404 \
-  "$(status -X POST -H 'content-type: application/json' -d '{"deviceId":"does-not-exist"}' "${BASE_URL}/api/devices/refresh")"
-expect "delete unknown device rejected" 404 \
-  "$(status -X POST -H 'content-type: application/json' -d '{"deviceId":"does-not-exist"}' "${BASE_URL}/api/devices/delete")"
+expect_gated_or "refresh unknown device rejected" 404 \
+  "$(mutating -X POST -H 'content-type: application/json' -d '{"deviceId":"does-not-exist"}' "${BASE_URL}/api/devices/refresh")"
+expect_gated_or "delete unknown device rejected" 404 \
+  "$(mutating -X POST -H 'content-type: application/json' -d '{"deviceId":"does-not-exist"}' "${BASE_URL}/api/devices/delete")"
 expect "check (empty inventory)" 200 \
   "$(status -X POST -H 'content-type: application/json' -d '{"devices":[]}' "${BASE_URL}/check")"
 expect "rejects invalid device filter" 400 \

@@ -35,6 +35,7 @@ Everything below is mandatory to run the Worker end to end:
 | **Cloudflare One Client (WARP)** enrolled on managed devices | Supplies the device inventory (device ID, serial, hostname, MAC) and is the enforcement point for policies | Windows, macOS, and Linux — serial-number checks are unsupported on mobile platforms |
 | **Cloudflare API token** with account-scoped *Zero Trust Write* | Lets the Worker maintain the serial list; also powers the dashboard's list selector | Create one under **My Profile > API Tokens** |
 | **Cortex XDR API key** with endpoint-read access | Reads each endpoint's `last_content_update_time`, hostname, and MAC via `get_endpoint` | Advanced or standard key; record the API key, key ID, and tenant API URL |
+| A generated **management token** | Guards mutating dashboard/API calls (`openssl rand -hex 32`, stored as the `MANAGEMENT_TOKEN` secret) | `/check` and read-only endpoints stay open; see [securing the endpoint](docs/setup.md#securing-the-endpoint) |
 | **Node.js and npm** | Deployment, tests, and the smoke test | Any current LTS release |
 
 ## Contents
