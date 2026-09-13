@@ -53,10 +53,10 @@ so the next synchronization removes it from the denylist, and deletes the
 endpoint snapshot when no other mapping references it. Devices that are still
 enrolled and reported by the provider are re-discovered on a later poll. As a
 safety guard, deleting a device the provider reported in the last 48 hours
-fails with 409 from the dashboard buttons — the row is likely active, and
-deleting it would open a brief enforcement gap. Override with
-`POST /api/devices/delete` + `"force": true` when you really mean it (for
-example removing a cloned enrollment that is actively polling).
+fails with 409 — the row is likely active, and deleting it would open a
+brief enforcement gap. The dashboard's **Delete** and **Delete selected**
+buttons catch this and ask for confirmation before retrying with `force`;
+scripted callers add `"force": true` to `POST /api/devices/delete` directly.
 
 The **Debug log** button opens a chat-style popup that streams the most recent
 Cortex requests and responses live — requests appear as outgoing bubbles,

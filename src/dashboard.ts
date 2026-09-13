@@ -850,21 +850,41 @@ const DASHBOARD_HTML = `<!doctype html>
       : "Delete selected";
   }
 
-  function deleteDevice(deviceId, done) {
-    mutatingFetch("/api/devices/delete", {
+  // Low-level delete call: flags a 409 (device still reporting to the
+  // provider) so callers can offer a confirm-then-force retry instead of
+  // just failing.
+  function requestDeviceDelete(body) {
+    return mutatingFetch("/api/devices/delete", {
       method: "POST",
       headers: {
         accept: "application/json",
         "content-type": "application/json"
       },
-      body: JSON.stringify({ deviceId: deviceId })
-    })
-      .then(function (r) {
-        if (r.status === 409) {
-          throw new Error("device still reports to the provider \\u00b7 force-delete via API to override");
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      if (r.status === 409) {
+        var err = new Error("device still reports to the provider");
+        err.recentlySeen = true;
+        throw err;
+      }
+      if (!r.ok) throw new Error("delete failed (" + r.status + ")");
+      return r.json();
+    });
+  }
+
+  function deleteDevice(deviceId, done) {
+    requestDeviceDelete({ deviceId: deviceId })
+      .catch(function (err) {
+        if (
+          err &&
+          err.recentlySeen &&
+          confirm(
+            "This device is still reporting to the provider. Deleting it opens a brief enforcement gap until it is rediscovered. Force delete anyway?"
+          )
+        ) {
+          return requestDeviceDelete({ deviceId: deviceId, force: true });
         }
-        if (!r.ok) throw new Error("delete failed (" + r.status + ")");
-        return r.json();
+        throw err;
       })
       .then(function () {
         setRefreshStatus("Deleted \\u00b7 serial leaves the denylist on next sync");
@@ -888,20 +908,18 @@ const DASHBOARD_HTML = `<!doctype html>
     var button = document.getElementById("delete-selected");
     button.disabled = true;
     button.textContent = "Deleting\\u2026";
-    mutatingFetch("/api/devices/delete", {
-      method: "POST",
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({ deviceIds: selectedIds })
-    })
-      .then(function (r) {
-        if (r.status === 409) {
-          throw new Error("selection contains devices still reporting to the provider \\u00b7 force-delete via API to override");
+    requestDeviceDelete({ deviceIds: selectedIds })
+      .catch(function (err) {
+        if (
+          err &&
+          err.recentlySeen &&
+          confirm(
+            "Selection contains devices still reporting to the provider. Deleting them opens a brief enforcement gap until they are rediscovered. Force delete anyway?"
+          )
+        ) {
+          return requestDeviceDelete({ deviceIds: selectedIds, force: true });
         }
-        if (!r.ok) throw new Error("delete failed (" + r.status + ")");
-        return r.json();
+        throw err;
       })
       .then(function (payload) {
         var message = "Deleted " + payload.deleted + " device(s)";
